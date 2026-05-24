@@ -1,0 +1,15 @@
+# Phase 3 baseline: encoder-decoder LSTM with attention.
+model: lstm
+batch_size: 32
+epochs: 60
+lr: 0.001
+weight_decay: 0.0001
+hidden_dim: 256
+n_layers: 2
+dropout: 0.2
+velocity_loss_weight: 1.0
+offset_loss_weight: 1.0
+grad_clip: 1.0
+seed: 444
+device: cuda
+overfit_one_batch: false

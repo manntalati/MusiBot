@@ -1,0 +1,16 @@
+# Phase 4 main model: conditional Transformer (encoder + AR decoder).
+model: transformer
+batch_size: 32
+epochs: 120
+lr: 0.0003
+weight_decay: 0.01
+hidden_dim: 256
+n_layers: 4
+n_heads: 8
+dropout: 0.1
+velocity_loss_weight: 1.0
+offset_loss_weight: 1.0
+grad_clip: 1.0
+seed: 444
+device: cuda
+overfit_one_batch: false

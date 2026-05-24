@@ -1,0 +1,12 @@
+# Data preparation settings.
+datasets:
+  gmd: true        # Magenta Groove MIDI — drum-language pretraining
+  lmd: true        # Lakh MIDI multi-track — conditional supervision
+  musdb18: true    # 150 songs with pre-isolated stems
+  user_songs: true # the 5 songs in data/raw/songs — fine-tuning
+
+window_bars: 8
+min_bars_per_clip: 8
+val_fraction: 0.1
+test_fraction: 0.1
+seed: 444

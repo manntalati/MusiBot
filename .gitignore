@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+data/external/
+data/processed/
+*.ckpt
+*.pt
+runs/
+wandb/
+
+.DS_Store
+.ipynb_checkpoints/
+drums.mid
+final.wav
