@@ -22,7 +22,7 @@ from .train import build_model, load_config, resolve_device
 
 
 @torch.no_grad()
-def evaluate(model, loader, device) -> dict:
+def evaluate(model, loader, device, threshold: float = 0.5) -> dict:
     model.eval()
     pred_hits, true_hits = [], []
     vel_err, off_err, n_hits = 0.0, 0.0, 0
@@ -31,9 +31,9 @@ def evaluate(model, loader, device) -> dict:
     for batch in loader:
         cond = batch["conditioning"].to(device)
         drums = batch["drums"].to(device)
-        pred = model.generate(cond)
+        pred = model.generate(cond, threshold=threshold)
 
-        p_hit = (torch.sigmoid(pred[..., CH_HIT]) > 0.5).float()
+        p_hit = (torch.sigmoid(pred[..., CH_HIT]) > threshold).float()
         t_hit = drums[..., CH_HIT]
         pred_hits.append(p_hit.cpu().numpy())
         true_hits.append(t_hit.cpu().numpy())
@@ -70,6 +70,14 @@ def main():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--config", required=True)
     parser.add_argument("--sources", nargs="*", default=None)
+    parser.add_argument(
+        "--threshold", type=float, default=0.5, help="hit probability cutoff"
+    )
+    parser.add_argument(
+        "--threshold-sweep",
+        action="store_true",
+        help="report F1 across thresholds 0.2..0.6 to find the operating point",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -79,11 +87,13 @@ def main():
     model.load_state_dict(state["model"])
 
     loaders = make_loaders(cfg.batch_size, sources=args.sources, num_workers=0)
-    metrics = evaluate(model, loaders["test"], device)
 
-    print("Test metrics:")
-    for k, v in metrics.items():
-        print(f"  {k}: {v}")
+    thresholds = [0.2, 0.3, 0.4, 0.5, 0.6] if args.threshold_sweep else [args.threshold]
+    for t in thresholds:
+        metrics = evaluate(model, loaders["test"], device, threshold=t)
+        print(f"Test metrics @ threshold={t}:")
+        for k, v in metrics.items():
+            print(f"  {k}: {v}")
 
 
 if __name__ == "__main__":

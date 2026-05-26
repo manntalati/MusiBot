@@ -1,9 +1,20 @@
 # Data preparation settings.
+#
+# Default workflow (Path A — audio-consistent training): train on `musdb18` +
+# `user` only. Both pipelines derive conditioning features from real audio with
+# librosa, so the train and inference feature distributions match.
+#
+# LMD is OFF by default because its conditioning is derived symbolically from
+# MIDI, which does not match real-audio inference. Re-enable only if you also
+# render LMD non-drum tracks to audio + extract_features on them (Path B).
+#
+# GMD is prepared (cheap) and can be used for *decoder-only* pretraining via
+# `--sources gmd`, but should not be mixed into conditional training.
 datasets:
-  gmd: true        # Magenta Groove MIDI — drum-language pretraining
-  lmd: true        # Lakh MIDI multi-track — conditional supervision
-  musdb18: true    # 150 songs with pre-isolated stems
-  user_songs: true # the 5 songs in data/raw/songs — fine-tuning
+  gmd: true        # decoder pretraining (don't mix into conditional training)
+  lmd: false       # disabled: symbolic conditioning != real-audio inference
+  musdb18: true    # primary conditional supervision (150 real-audio songs)
+  user_songs: true # fine-tuning tier (your 5 songs)
 
 window_bars: 8
 min_bars_per_clip: 8

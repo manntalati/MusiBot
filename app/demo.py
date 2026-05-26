@@ -19,11 +19,11 @@ from musibot.render import render
 
 
 def build_app(checkpoint: str, config: str, soundfont: str | None):
-    def run(song_path: str, drum_gain: float):
+    def run(song_path: str, drum_gain: float, threshold: float):
         if not song_path:
             raise gr.Error("Upload a drumless song first.")
         tmp = Path(tempfile.mkdtemp())
-        midi = generate_drums(song_path, checkpoint, config, tmp / "drums.mid")
+        midi = generate_drums(song_path, checkpoint, config, tmp / "drums.mid", threshold)
         final = render(song_path, midi, tmp / "final.wav", soundfont, drum_gain)
         return str(final), str(midi)
 
@@ -31,11 +31,16 @@ def build_app(checkpoint: str, config: str, soundfont: str | None):
         gr.Markdown("# MusiBot\nUpload a song with no drums; get it back with an AI drum track.")
         with gr.Row():
             song = gr.Audio(label="Drumless song", type="filepath")
+        with gr.Row():
             gain = gr.Slider(0.0, 1.5, value=0.8, label="Drum level")
+            thresh = gr.Slider(
+                0.1, 0.7, value=0.5, step=0.05,
+                label="Hit threshold (lower = more drums)",
+            )
         go = gr.Button("Generate drums", variant="primary")
         out_audio = gr.Audio(label="Song with generated drums")
         out_midi = gr.File(label="Drum MIDI")
-        go.click(run, inputs=[song, gain], outputs=[out_audio, out_midi])
+        go.click(run, inputs=[song, gain, thresh], outputs=[out_audio, out_midi])
     return app
 
 

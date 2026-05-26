@@ -13,3 +13,4 @@ grad_clip: 1.0
 seed: 444
 device: cuda
 overfit_one_batch: false
+patience: 12

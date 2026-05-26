@@ -76,6 +76,7 @@ class ConditionalDrumTransformer(nn.Module):
         conditioning: torch.Tensor,
         drums: torch.Tensor | None = None,
         teacher_forcing: bool = True,
+        threshold: float = 0.5,
     ) -> torch.Tensor:
         memory = self.encode(conditioning)
         B, T, _ = conditioning.shape
@@ -86,9 +87,9 @@ class ConditionalDrumTransformer(nn.Module):
             tgt_in = torch.cat([start, drums[:, :-1]], dim=1)
             return self._decode(tgt_in, memory)
 
-        return self._generate(memory, T)
+        return self._generate(memory, T, threshold)
 
-    def _generate(self, memory: torch.Tensor, T: int) -> torch.Tensor:
+    def _generate(self, memory: torch.Tensor, T: int, threshold: float = 0.5) -> torch.Tensor:
         B = memory.size(0)
         device = memory.device
         generated = torch.zeros(B, 1, N_DRUM_CLASSES, N_CHANNELS, device=device)
@@ -96,13 +97,13 @@ class ConditionalDrumTransformer(nn.Module):
         for _ in range(T):
             step = self._decode(generated, memory)[:, -1]   # [B, 9, 3]
             outputs.append(step)
-            generated = torch.cat([generated, binarize(step).unsqueeze(1)], dim=1)
+            generated = torch.cat([generated, binarize(step, threshold).unsqueeze(1)], dim=1)
         return torch.stack(outputs, dim=1)
 
     @torch.no_grad()
-    def generate(self, conditioning: torch.Tensor) -> torch.Tensor:
+    def generate(self, conditioning: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
         self.eval()
-        return self.forward(conditioning, drums=None, teacher_forcing=False)
+        return self.forward(conditioning, drums=None, teacher_forcing=False, threshold=threshold)
 
 
 __all__ = ["ConditionalDrumTransformer", "WINDOW_STEPS"]

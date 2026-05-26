@@ -70,7 +70,7 @@ def run_epoch(model, loader, loss_fn, device, optimizer=None, grad_clip=1.0):
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimizer.step()
         for k in totals:
-            totals[k] += float(losses[k])
+            totals[k] += float(losses[k].detach())
         n += 1
 
     return {k: v / max(1, n) for k, v in totals.items()}
@@ -111,6 +111,7 @@ def train(cfg: TrainConfig, sources: list[str] | None = None):
 
     CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
     best_val = float("inf")
+    no_improve = 0
     for epoch in range(1, cfg.epochs + 1):
         tr = run_epoch(model, loaders["train"], loss_fn, device, optimizer, cfg.grad_clip)
         va = run_epoch(model, loaders["val"], loss_fn, device)
@@ -120,9 +121,15 @@ def train(cfg: TrainConfig, sources: list[str] | None = None):
         )
         if va["total"] < best_val:
             best_val = va["total"]
+            no_improve = 0
             ckpt = CHECKPOINT_DIR / f"{cfg.model}_best.pt"
             torch.save({"model": model.state_dict(), "config": vars(cfg), "epoch": epoch}, ckpt)
             print(f"  saved {ckpt}")
+        else:
+            no_improve += 1
+            if no_improve >= cfg.patience:
+                print(f"Early stop: val loss has not improved in {cfg.patience} epochs.")
+                break
 
 
 def main():

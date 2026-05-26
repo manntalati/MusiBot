@@ -16,6 +16,7 @@ Tiers (see the implementation plan):
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 
 import librosa
@@ -23,6 +24,11 @@ import numpy as np
 import pretty_midi
 import yaml
 from tqdm import tqdm
+
+log = logging.getLogger("musibot.datasets")
+
+# Audio file extensions accepted by prepare_song_dir.
+AUDIO_EXTS = ("*.mp3", "*.wav", "*.flac", "*.m4a", "*.ogg")
 
 from ..config import (
     EXTERNAL_DIR,
@@ -116,13 +122,18 @@ def prepare_gmd(root: Path) -> int:
             cond = positional_conditioning(len(drums))
             save_clip(mid.stem + f"_{count}", "gmd", cond, drums, tempo)
             count += 1
-        except Exception:
-            continue
+        except Exception as e:
+            log.warning("gmd: skipped %s (%s)", mid, e)
     return count
 
 
 def prepare_lmd(root: Path, limit: int | None = None) -> int:
-    """Lakh MIDI: split drum vs non-drum tracks for clean conditional pairs."""
+    """Lakh MIDI: split drum vs non-drum tracks for clean conditional pairs.
+
+    Note: LMD conditioning is *symbolic* (derived from MIDI), which does not
+    match the audio-derived features used at inference. Use only for Path B
+    (render-to-audio) experiments, not vanilla conditional training.
+    """
     count = 0
     files = sorted(root.rglob("*.mid"))
     for mid in tqdm(files[:limit], desc="lmd"):
@@ -135,40 +146,55 @@ def prepare_lmd(root: Path, limit: int | None = None) -> int:
             cond = symbolic_conditioning(pm, tempo, len(drums))
             save_clip(mid.stem + f"_{count}", "lmd", cond, drums, tempo)
             count += 1
-        except Exception:
-            continue
+        except Exception as e:
+            log.warning("lmd: skipped %s (%s)", mid, e)
     return count
 
 
 def prepare_musdb18(root: Path) -> int:
     """MUSDB18: use the supplied drum/accompaniment stems (no separation)."""
     count = 0
-    for drum_wav in tqdm(sorted(root.rglob("drums.wav")), desc="musdb18"):
+    drum_files = sorted(root.rglob("drums.wav"))
+    if not drum_files:
+        log.warning("musdb18: no drums.wav under %s — download MUSDB18-HQ first", root)
+    for drum_wav in tqdm(drum_files, desc="musdb18"):
         try:
             song_dir = drum_wav.parent
             drum_audio, sr = librosa.load(str(drum_wav), sr=SAMPLE_RATE, mono=True)
             acc_audio = _load_accompaniment(song_dir, sr)
             _prepare_audio_pair(song_dir.name, "musdb18", acc_audio, drum_audio, sr)
             count += 1
-        except Exception:
-            continue
+        except Exception as e:
+            log.warning("musdb18: skipped %s (%s)", drum_wav.parent, e)
+    return count
+
+
+def prepare_song_dir(root: Path, source_name: str) -> int:
+    """Demucs-separate every audio file under ``root`` and prepare a clip.
+
+    Use this to grow the training set: drop a folder of MP3s/WAVs anywhere and
+    point this at it, e.g. ``--song-dir ~/Music/rock --song-dir-name rock``.
+    """
+    files = sorted(p for ext in AUDIO_EXTS for p in root.glob(ext))
+    if not files:
+        log.warning("%s: no audio files in %s (looked for %s)", source_name, root, AUDIO_EXTS)
+        return 0
+    count = 0
+    for song in tqdm(files, desc=source_name):
+        try:
+            stems = separate_song(song)
+            drum_audio = librosa.resample(stems["drums"], orig_sr=44100, target_sr=SAMPLE_RATE)
+            acc_audio = librosa.resample(stems["accompaniment"], orig_sr=44100, target_sr=SAMPLE_RATE)
+            _prepare_audio_pair(song.stem, source_name, acc_audio, drum_audio, SAMPLE_RATE)
+            count += 1
+        except Exception as e:
+            log.warning("%s: skipped %s (%s)", source_name, song, e)
     return count
 
 
 def prepare_user_songs(root: Path = RAW_SONGS_DIR) -> int:
     """The 5 source songs: Demucs-separate, then transcribe the drum stem."""
-    count = 0
-    for song in tqdm(sorted(root.glob("*.mp3")), desc="user"):
-        try:
-            stems = separate_song(song)
-            sr = 44100
-            drum_audio = librosa.resample(stems["drums"], orig_sr=sr, target_sr=SAMPLE_RATE)
-            acc_audio = librosa.resample(stems["accompaniment"], orig_sr=sr, target_sr=SAMPLE_RATE)
-            _prepare_audio_pair(song.stem, "user", acc_audio, drum_audio, SAMPLE_RATE)
-            count += 1
-        except Exception:
-            continue
-    return count
+    return prepare_song_dir(root, "user")
 
 
 def _load_accompaniment(song_dir: Path, sr: int) -> np.ndarray:
@@ -196,8 +222,20 @@ def main():
     parser = argparse.ArgumentParser(description="Prepare MusiBot training clips")
     parser.add_argument("--config", default="configs/data.yaml")
     parser.add_argument("--lmd-limit", type=int, default=None, help="cap LMD files")
+    parser.add_argument(
+        "--song-dir",
+        type=Path,
+        default=None,
+        help="additional folder of MP3/WAV songs to Demucs-separate and prepare",
+    )
+    parser.add_argument(
+        "--song-dir-name",
+        default="extra",
+        help="tier name under data/processed/ for --song-dir output",
+    )
     args = parser.parse_args()
 
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     cfg = yaml.safe_load(Path(args.config).read_text())["datasets"]
     totals: dict[str, int] = {}
 
@@ -209,6 +247,8 @@ def main():
         totals["musdb18"] = prepare_musdb18(EXTERNAL_DIR / "musdb18")
     if cfg.get("user_songs"):
         totals["user"] = prepare_user_songs()
+    if args.song_dir:
+        totals[args.song_dir_name] = prepare_song_dir(args.song_dir, args.song_dir_name)
 
     print("Prepared clips:", totals)
     print("Output:", PROCESSED_DIR)

@@ -49,13 +49,37 @@ pip install -e ".[app,dev]"
 
 ## Usage
 
+The recommended workflow uses **audio-consistent** training data only —
+MUSDB18 (150 songs with isolated stems) + your own songs. Train and inference
+share the same librosa feature pipeline, so the model generalizes.
+
 ```bash
-bash scripts/download_data.sh                       # fetch datasets
-python -m musibot.data.datasets --config configs/data.yaml   # prepare tensors
-python -m musibot.train --config configs/model_transformer.yaml
-python -m musibot.generate --song path/to/drumless.wav --out drums.mid
+# 1. Datasets. GMD is auto-downloaded; MUSDB18-HQ must be fetched manually
+#    from Zenodo (see scripts/download_data.sh) and unpacked into
+#    data/external/musdb18/ so each song dir has drums.wav / bass.wav / etc.
+bash scripts/download_data.sh
+
+# 2. Prepare clips (configs/data.yaml has LMD off by default).
+python -m musibot.data.datasets --config configs/data.yaml
+
+# Optional: drop any folder of MP3s in for more training data.
+python -m musibot.data.datasets --song-dir ~/Music/rock --song-dir-name rock
+
+# 3. Train on audio-consistent tiers only (skip gmd/lmd).
+python -m musibot.train --config configs/model_transformer.yaml --sources musdb18 user
+
+# 4. Evaluate — sweep thresholds to find the operating point.
+python -m musibot.evaluate \
+  --checkpoint runs/transformer_best.pt --config configs/model_transformer.yaml \
+  --sources musdb18 user --threshold-sweep
+
+# 5. Inference on a drumless song. Use whichever threshold gave the best F1.
+python -m musibot.generate --song path/to/drumless.wav --checkpoint runs/transformer_best.pt \
+  --config configs/model_transformer.yaml --threshold 0.3 --out drums.mid
 python -m musibot.render --song path/to/drumless.wav --drums drums.mid --out final.wav
-python app/demo.py                                  # launch the Gradio demo
+
+# 6. Demo.
+python app/demo.py --checkpoint runs/transformer_best.pt --config configs/model_transformer.yaml
 ```
 
 ## Status

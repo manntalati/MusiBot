@@ -105,4 +105,5 @@ class TrainConfig:
     seed: int = 444
     device: str = "cuda"
     overfit_one_batch: bool = False     # Phase 3 pipeline sanity check
+    patience: int = 15                  # epochs with no val improvement -> early stop
     extra: dict = field(default_factory=dict)

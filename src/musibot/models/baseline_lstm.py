@@ -28,9 +28,13 @@ def activate(raw: torch.Tensor) -> torch.Tensor:
     return torch.cat([hit, vel, off], dim=-1)
 
 
-def binarize(step: torch.Tensor) -> torch.Tensor:
-    """Turn a generated step into autoregressive feedback (hard hit decisions)."""
-    hit = (torch.sigmoid(step[..., 0:1]) > 0.5).float()
+def binarize(step: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
+    """Turn a generated step into autoregressive feedback (hard hit decisions).
+
+    Lower thresholds make the model more "willing" to place hits — useful when
+    a sparsely trained model collapses to silence at the default 0.5.
+    """
+    hit = (torch.sigmoid(step[..., 0:1]) > threshold).float()
     return torch.cat([hit, step[..., 1:2], step[..., 2:3]], dim=-1)
 
 
@@ -62,6 +66,7 @@ class BaselineLSTM(nn.Module):
         conditioning: torch.Tensor,
         drums: torch.Tensor | None = None,
         teacher_forcing: bool = True,
+        threshold: float = 0.5,
     ) -> torch.Tensor:
         B, T, _ = conditioning.shape
         device = conditioning.device
@@ -87,11 +92,11 @@ class BaselineLSTM(nn.Module):
             if teacher_forcing and drums is not None:
                 prev = drums[:, t]
             else:
-                prev = binarize(step)
+                prev = binarize(step, threshold)
 
         return torch.stack(steps, dim=1)                  # [B, T, 9, 3]
 
     @torch.no_grad()
-    def generate(self, conditioning: torch.Tensor) -> torch.Tensor:
+    def generate(self, conditioning: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
         self.eval()
-        return self.forward(conditioning, drums=None, teacher_forcing=False)
+        return self.forward(conditioning, drums=None, teacher_forcing=False, threshold=threshold)
