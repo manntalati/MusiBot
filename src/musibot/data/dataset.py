@@ -2,7 +2,8 @@
 
 Long clips are sliced into fixed-length 8-bar windows. Splits are assigned per
 *clip* (by deterministic hash of the filename) so windows from one song never
-leak across the train/val/test boundary.
+leak across the train/val/test boundary. The magnitude conditioning features
+are standardized on load with the corpus stats fitted by ``normalize.py``.
 """
 
 from __future__ import annotations
@@ -15,10 +16,11 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from ..config import PROCESSED_DIR, WINDOW_STEPS
+from ..config import PROCESSED_DIR, UNKNOWN_STYLE_ID, WINDOW_STEPS
+from .normalize import apply_stats, load_stats
 
 
-def _split_of(name: str, val_frac: float, test_frac: float) -> str:
+def split_of(name: str, val_frac: float, test_frac: float) -> str:
     """Deterministically bucket a clip into train/val/test by name hash."""
     h = int(hashlib.md5(name.encode()).hexdigest(), 16) % 1000 / 1000.0
     if h < test_frac:
@@ -29,13 +31,14 @@ def _split_of(name: str, val_frac: float, test_frac: float) -> str:
 
 
 @lru_cache(maxsize=256)
-def _load_npz(path: str) -> tuple[np.ndarray, np.ndarray]:
+def _load_npz(path: str) -> tuple[np.ndarray, np.ndarray, int]:
     data = np.load(path)
-    return data["conditioning"], data["drums"]
+    style_id = int(data["style_id"]) if "style_id" in data else UNKNOWN_STYLE_ID
+    return data["conditioning"], data["drums"], style_id
 
 
 class DrumDataset(Dataset):
-    """Yields ``(conditioning [W, F], drums [W, 9, 3])`` windowed tensors."""
+    """Yields ``conditioning [W, F]``, ``drums [W, 9, 3]``, ``style`` tensors."""
 
     def __init__(
         self,
@@ -46,6 +49,7 @@ class DrumDataset(Dataset):
         processed_dir: Path = PROCESSED_DIR,
     ):
         self.split = split
+        self.stats = load_stats()  # None when no stats file -> features pass through
         hop = WINDOW_STEPS // 2 if split == "train" else WINDOW_STEPS
         self.index: list[tuple[str, int]] = []
 
@@ -56,9 +60,9 @@ class DrumDataset(Dataset):
         )
         for root in search:
             for npz in sorted(Path(root).rglob("*.npz")):
-                if _split_of(npz.stem, val_frac, test_frac) != split:
+                if split_of(npz.stem, val_frac, test_frac) != split:
                     continue
-                cond, _ = _load_npz(str(npz))
+                cond, _, _ = _load_npz(str(npz))
                 T = len(cond)
                 if T < WINDOW_STEPS:
                     continue
@@ -70,11 +74,13 @@ class DrumDataset(Dataset):
 
     def __getitem__(self, i: int) -> dict[str, torch.Tensor]:
         path, start = self.index[i]
-        cond, drums = _load_npz(path)
+        cond, drums, style_id = _load_npz(path)
         end = start + WINDOW_STEPS
+        window = apply_stats(cond[start:end], self.stats)
         return {
-            "conditioning": torch.from_numpy(cond[start:end].copy()),
+            "conditioning": torch.from_numpy(np.ascontiguousarray(window)),
             "drums": torch.from_numpy(drums[start:end].copy()),
+            "style": torch.tensor(style_id, dtype=torch.long),
         }
 
 

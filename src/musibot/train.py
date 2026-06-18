@@ -61,8 +61,9 @@ def run_epoch(model, loader, loss_fn, device, optimizer=None, grad_clip=1.0):
     for batch in loader:
         cond = batch["conditioning"].to(device)
         drums = batch["drums"].to(device)
+        style = batch["style"].to(device)
         with torch.set_grad_enabled(training):
-            pred = model(cond, drums, teacher_forcing=True)
+            pred = model(cond, drums, teacher_forcing=True, style=style)
             losses = loss_fn(pred, drums)
         if training:
             optimizer.zero_grad()
@@ -80,9 +81,10 @@ def overfit_one_batch(model, loader, loss_fn, device, optimizer, grad_clip, step
     batch = next(iter(loader))
     cond = batch["conditioning"].to(device)
     drums = batch["drums"].to(device)
+    style = batch["style"].to(device)
     model.train()
     for step in range(steps):
-        pred = model(cond, drums, teacher_forcing=True)
+        pred = model(cond, drums, teacher_forcing=True, style=style)
         losses = loss_fn(pred, drums)
         optimizer.zero_grad()
         losses["total"].backward()

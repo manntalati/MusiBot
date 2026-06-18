@@ -77,13 +77,78 @@ CLASS_TO_GM_NOTE: list[int] = [36, 38, 48, 45, 43, 46, 42, 49, 51]
 FEATURE_NAMES = [
     "beat_phase",       # position within the beat, 0..1
     "is_downbeat",      # 1 on the first step of a bar
-    "rms_energy",       # normalized loudness
-    "onset_density",    # onset strength of the drumless mix
-    "spectral_contrast",
+    "rms_energy",       # loudness (raw; standardized by data/normalize.py)
+    "onset_density",    # onset strength of the drumless mix (raw)
+    "spectral_contrast",  # (raw)
     *[f"chroma_{i}" for i in range(12)],
     "section_id",       # normalized structural-section index
 ]
 FEATURE_DIM = len(FEATURE_NAMES)  # 18
+
+# The unbounded "magnitude" features whose scale is clip-dependent. These are
+# emitted in raw librosa units and z-scored with corpus-level statistics
+# (data/normalize.py) so the train and inference distributions line up. The
+# remaining dims are already bounded (phase/downbeat/chroma/section) and pass
+# through untouched.
+NORM_FEATURE_INDICES = (2, 3, 4)
+FEATURE_STATS_FILE = PROCESSED_DIR / "feature_stats.npz"
+
+# --- Style conditioning -----------------------------------------------------
+
+# Coarse genre/style token. A global per-clip label, embedded and broadcast
+# across the conditioning sequence, so the model can pick a kit and groove
+# idiom (a rock song and a bossa nova want very different drums). Index 0 is
+# the catch-all for clips with no known style (e.g. rendered LMD, user songs).
+STYLE_VOCAB = [
+    "unknown",
+    "rock",
+    "pop",
+    "punk",
+    "metal",
+    "funk",
+    "soul",
+    "hiphop",
+    "jazz",
+    "blues",
+    "country",
+    "reggae",
+    "latin",
+    "afrocuban",
+    "neworleans",
+    "gospel",
+    "dance",
+    "electronic",
+    "world",
+]
+STYLE_TO_ID: dict[str, int] = {s: i for i, s in enumerate(STYLE_VOCAB)}
+N_STYLES = len(STYLE_VOCAB)
+UNKNOWN_STYLE_ID = STYLE_TO_ID["unknown"]
+
+# Raw style strings that don't match a vocab entry are remapped here before
+# falling back to "unknown".
+_STYLE_ALIASES = {
+    "highlife": "world",
+    "middleeastern": "world",
+    "afrobeat": "world",
+    "samba": "latin",
+    "brazilian": "latin",
+    "bossanova": "latin",
+    "hip-hop": "hiphop",
+    "rnb": "soul",
+    "r&b": "soul",
+}
+
+
+def canonical_style(raw: str | None) -> int:
+    """Map a free-form style string (e.g. ``"neworleans/funk"``) to a style id.
+
+    Uses the top-level token before any ``/`` and falls back to ``unknown``.
+    """
+    if not raw:
+        return UNKNOWN_STYLE_ID
+    top = raw.strip().lower().split("/")[0].replace(" ", "")
+    top = _STYLE_ALIASES.get(top, top)
+    return STYLE_TO_ID.get(top, UNKNOWN_STYLE_ID)
 
 
 @dataclass

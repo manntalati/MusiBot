@@ -1,20 +1,22 @@
 # Data preparation settings.
 #
-# Default workflow (Path A — audio-consistent training): train on `musdb18` +
-# `user` only. Both pipelines derive conditioning features from real audio with
-# librosa, so the train and inference feature distributions match.
+# Every conditional tier now derives its features from *real audio* through the
+# same librosa `extract_features` used at inference, so train/inference feature
+# distributions match. LMD is the primary source: its non-drum tracks are
+# rendered to an in-memory mix (FluidSynth) for features, while the drum grid is
+# read straight from the MIDI (ground-truth targets, no transcription). No audio
+# is written to disk — set MUSIBOT_SOUNDFONT to a .sf2 (e.g. FluidR3_GM) first.
 #
-# LMD is OFF by default because its conditioning is derived symbolically from
-# MIDI, which does not match real-audio inference. Re-enable only if you also
-# render LMD non-drum tracks to audio + extract_features on them (Path B).
+# Rendering all 178k LMD files is unnecessary; cap with `--lmd-limit N` (the
+# curation filters in prepare_lmd_rendered already drop junk/duplicates).
 #
-# GMD is prepared (cheap) and can be used for *decoder-only* pretraining via
-# `--sources gmd`, but should not be mixed into conditional training.
+# GMD is prepared (cheap) for *decoder-only* pretraining via `--sources gmd`;
+# its conditioning is positional-only, so don't mix it into conditional training.
 datasets:
   gmd: true        # decoder pretraining (don't mix into conditional training)
-  lmd: false       # disabled: symbolic conditioning != real-audio inference
-  musdb18: true    # primary conditional supervision (150 real-audio songs)
-  user_songs: true # fine-tuning tier (your 5 songs)
+  lmd: true        # primary conditional supervision (rendered LMD, ground-truth drums)
+  musdb18: true    # real-audio anchor (150 songs, if downloaded)
+  user_songs: true # fine-tuning tier (your songs)
 
 window_bars: 8
 min_bars_per_clip: 8

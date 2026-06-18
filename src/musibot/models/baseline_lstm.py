@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..config import FEATURE_DIM, N_CHANNELS, N_DRUM_CLASSES
+from ..config import FEATURE_DIM, N_CHANNELS, N_DRUM_CLASSES, N_STYLES
 
 _FLAT = N_DRUM_CLASSES * N_CHANNELS  # 27
 
@@ -51,6 +51,7 @@ class BaselineLSTM(nn.Module):
             bidirectional=True,
             dropout=dropout if n_layers > 1 else 0.0,
         )
+        self.style_emb = nn.Embedding(N_STYLES, hidden_dim)
         self.prev_proj = nn.Linear(_FLAT, hidden_dim)
         self.cell = nn.LSTMCell(hidden_dim * 2, hidden_dim)
         self.attn = nn.Linear(hidden_dim, hidden_dim)
@@ -67,10 +68,14 @@ class BaselineLSTM(nn.Module):
         drums: torch.Tensor | None = None,
         teacher_forcing: bool = True,
         threshold: float = 0.5,
+        style: torch.Tensor | None = None,
     ) -> torch.Tensor:
         B, T, _ = conditioning.shape
         device = conditioning.device
         enc, _ = self.encoder(conditioning)               # [B, T, hidden]
+        if style is None:
+            style = torch.zeros(B, dtype=torch.long, device=device)  # unknown
+        enc = enc + self.style_emb(style).unsqueeze(1)    # broadcast style over time
 
         h = torch.zeros(B, self.hidden_dim, device=device)
         c = torch.zeros(B, self.hidden_dim, device=device)
@@ -97,6 +102,13 @@ class BaselineLSTM(nn.Module):
         return torch.stack(steps, dim=1)                  # [B, T, 9, 3]
 
     @torch.no_grad()
-    def generate(self, conditioning: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
+    def generate(
+        self,
+        conditioning: torch.Tensor,
+        threshold: float = 0.5,
+        style: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         self.eval()
-        return self.forward(conditioning, drums=None, teacher_forcing=False, threshold=threshold)
+        return self.forward(
+            conditioning, drums=None, teacher_forcing=False, threshold=threshold, style=style
+        )

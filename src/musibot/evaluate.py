@@ -31,7 +31,8 @@ def evaluate(model, loader, device, threshold: float = 0.5) -> dict:
     for batch in loader:
         cond = batch["conditioning"].to(device)
         drums = batch["drums"].to(device)
-        pred = model.generate(cond, threshold=threshold)
+        style = batch["style"].to(device)
+        pred = model.generate(cond, threshold=threshold, style=style)
 
         p_hit = (torch.sigmoid(pred[..., CH_HIT]) > threshold).float()
         t_hit = drums[..., CH_HIT]

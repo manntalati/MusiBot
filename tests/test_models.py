@@ -54,3 +54,15 @@ def test_loss_decreases_on_one_batch():
             if first is None:
                 first = float(loss.detach())
         assert float(loss.detach()) < first
+
+
+def test_style_token_changes_output():
+    """The style embedding must actually influence the prediction."""
+    cond, drums = _batch()
+    style_a = torch.zeros(B, dtype=torch.long)
+    style_b = torch.full((B,), 5, dtype=torch.long)
+    for model in _check_models():
+        model.eval()
+        out_a = model(cond, drums, teacher_forcing=True, style=style_a)
+        out_b = model(cond, drums, teacher_forcing=True, style=style_b)
+        assert not torch.allclose(out_a, out_b)

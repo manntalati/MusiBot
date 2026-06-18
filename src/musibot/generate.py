@@ -16,8 +16,9 @@ import librosa
 import numpy as np
 import torch
 
-from .config import CH_HIT, SAMPLE_RATE, WINDOW_STEPS
+from .config import CH_HIT, SAMPLE_RATE, WINDOW_STEPS, canonical_style
 from .data.features import extract_features
+from .data.normalize import apply_stats, load_stats
 from .data.representation import grid_to_midi
 from .train import build_model, load_config, resolve_device
 
@@ -41,17 +42,21 @@ def _window(features: np.ndarray) -> tuple[np.ndarray, int]:
 
 @torch.no_grad()
 def song_to_grid(
-    model, audio: np.ndarray, sr: int, device, threshold: float = 0.5
+    model, audio: np.ndarray, sr: int, device, threshold: float = 0.5, style: str | None = None
 ) -> tuple[np.ndarray, float]:
     """Drumless audio -> generated drum grid ``[T, 9, 3]`` and its tempo.
 
     ``threshold`` applies to ``sigmoid(hit_logit)``. Lower it (e.g. 0.3) if the
-    model is too conservative and the output is sparse/empty.
+    model is too conservative and the output is sparse/empty. ``style`` is an
+    optional genre tag (see ``config.STYLE_VOCAB``); features are standardized
+    with the same corpus stats used in training.
     """
     features, tempo, _ = extract_features(audio, sr)
+    features = apply_stats(features, load_stats())
     windows, T = _window(features)
     cond = torch.from_numpy(windows).to(device)
-    grid = model.generate(cond, threshold=threshold)  # [n_win, WINDOW_STEPS, 9, 3]
+    style_t = torch.full((cond.size(0),), canonical_style(style), dtype=torch.long, device=device)
+    grid = model.generate(cond, threshold=threshold, style=style_t)  # [n_win, WINDOW_STEPS, 9, 3]
     # Channel 0 in the model output is still a raw logit; convert to 0/1 here
     # so grid_to_midi's ``> 0.5`` thresholding is consistent with `threshold`.
     grid[..., CH_HIT] = (torch.sigmoid(grid[..., CH_HIT]) > threshold).float()
@@ -65,13 +70,14 @@ def generate_drums(
     config: str,
     out_midi: str | Path = "drums.mid",
     threshold: float = 0.5,
+    style: str | None = None,
 ) -> Path:
     cfg = load_config(config)
     device = resolve_device(cfg.device)
     model = load_model(checkpoint, cfg, device)
 
     audio, sr = librosa.load(str(song_path), sr=SAMPLE_RATE, mono=True)
-    grid, tempo = song_to_grid(model, audio, sr, device, threshold=threshold)
+    grid, tempo = song_to_grid(model, audio, sr, device, threshold=threshold, style=style)
 
     pm = grid_to_midi(grid, tempo)
     out_midi = Path(out_midi)
@@ -93,8 +99,13 @@ def main():
         default=0.5,
         help="hit probability cutoff; try 0.3 if output is sparse",
     )
+    parser.add_argument(
+        "--style",
+        default=None,
+        help="genre tag to condition on (e.g. rock, funk, jazz); see config.STYLE_VOCAB",
+    )
     args = parser.parse_args()
-    generate_drums(args.song, args.checkpoint, args.config, args.out, args.threshold)
+    generate_drums(args.song, args.checkpoint, args.config, args.out, args.threshold, args.style)
 
 
 if __name__ == "__main__":

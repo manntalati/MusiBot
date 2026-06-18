@@ -16,7 +16,13 @@ import math
 import torch
 import torch.nn as nn
 
-from ..config import FEATURE_DIM, N_CHANNELS, N_DRUM_CLASSES, WINDOW_STEPS
+from ..config import (
+    FEATURE_DIM,
+    N_CHANNELS,
+    N_DRUM_CLASSES,
+    N_STYLES,
+    WINDOW_STEPS,
+)
 from .baseline_lstm import activate, binarize
 
 _FLAT = N_DRUM_CLASSES * N_CHANNELS  # 27
@@ -48,6 +54,7 @@ class ConditionalDrumTransformer(nn.Module):
         self.pos = PositionalEncoding(hidden_dim)
 
         self.cond_proj = nn.Linear(FEATURE_DIM, hidden_dim)
+        self.style_emb = nn.Embedding(N_STYLES, hidden_dim)
         enc_layer = nn.TransformerEncoderLayer(
             hidden_dim, n_heads, hidden_dim * 4, dropout, batch_first=True
         )
@@ -60,8 +67,16 @@ class ConditionalDrumTransformer(nn.Module):
         self.decoder = nn.TransformerDecoder(dec_layer, n_layers)
         self.head = nn.Linear(hidden_dim, _FLAT)
 
-    def encode(self, conditioning: torch.Tensor) -> torch.Tensor:
-        return self.encoder(self.pos(self.cond_proj(conditioning)))
+    def _style_bias(self, style: torch.Tensor | None, B: int, device) -> torch.Tensor:
+        """Per-clip style embedding ``[B, 1, hidden]``, broadcast over time."""
+        if style is None:
+            style = torch.zeros(B, dtype=torch.long, device=device)  # unknown
+        return self.style_emb(style).unsqueeze(1)
+
+    def encode(self, conditioning: torch.Tensor, style: torch.Tensor | None = None) -> torch.Tensor:
+        x = self.pos(self.cond_proj(conditioning))
+        x = x + self._style_bias(style, x.size(0), x.device)
+        return self.encoder(x)
 
     def _decode(self, tgt_steps: torch.Tensor, memory: torch.Tensor) -> torch.Tensor:
         """Run the decoder over teacher/autoregressive input ``[B, L, 9, 3]``."""
@@ -77,8 +92,9 @@ class ConditionalDrumTransformer(nn.Module):
         drums: torch.Tensor | None = None,
         teacher_forcing: bool = True,
         threshold: float = 0.5,
+        style: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        memory = self.encode(conditioning)
+        memory = self.encode(conditioning, style)
         B, T, _ = conditioning.shape
 
         if teacher_forcing and drums is not None:
@@ -101,9 +117,16 @@ class ConditionalDrumTransformer(nn.Module):
         return torch.stack(outputs, dim=1)
 
     @torch.no_grad()
-    def generate(self, conditioning: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
+    def generate(
+        self,
+        conditioning: torch.Tensor,
+        threshold: float = 0.5,
+        style: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         self.eval()
-        return self.forward(conditioning, drums=None, teacher_forcing=False, threshold=threshold)
+        return self.forward(
+            conditioning, drums=None, teacher_forcing=False, threshold=threshold, style=style
+        )
 
 
 __all__ = ["ConditionalDrumTransformer", "WINDOW_STEPS"]

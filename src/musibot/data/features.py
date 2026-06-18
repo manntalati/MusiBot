@@ -22,11 +22,6 @@ from ..config import (
 from .representation import step_duration
 
 
-def _minmax(x: np.ndarray) -> np.ndarray:
-    lo, hi = float(x.min()), float(x.max())
-    return (x - lo) / (hi - lo) if hi > lo else np.zeros_like(x)
-
-
 def _to_steps(values: np.ndarray, frame_times: np.ndarray, step_times: np.ndarray) -> np.ndarray:
     """Interpolate a frame-rate feature onto the 16th-note step grid."""
     return np.interp(step_times, frame_times, values)
@@ -73,10 +68,13 @@ def extract_features(
     features[:, 0] = (steps % STEPS_PER_BEAT) / STEPS_PER_BEAT
     features[:, 1] = (steps % STEPS_PER_BAR == 0).astype(np.float32)
 
-    # 2-4: energy / onset / spectral contrast.
-    features[:, 2] = _minmax(_to_steps(rms, frame_times, step_times))
-    features[:, 3] = _minmax(_to_steps(onset, frame_times, step_times))
-    features[:, 4] = _minmax(_to_steps(contrast, frame_times, step_times))
+    # 2-4: energy / onset / spectral contrast, in raw librosa units. These are
+    # z-scored later against corpus statistics (data/normalize.py) rather than
+    # min-maxed per clip, so the same physical loudness maps to the same feature
+    # value at train and inference time.
+    features[:, 2] = _to_steps(rms, frame_times, step_times)
+    features[:, 3] = _to_steps(onset, frame_times, step_times)
+    features[:, 4] = _to_steps(contrast, frame_times, step_times)
 
     # 5-16: 12-d chroma.
     for c in range(12):
