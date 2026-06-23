@@ -166,6 +166,11 @@ class TrainConfig:
     dropout: float = 0.1
     velocity_loss_weight: float = 1.0
     offset_loss_weight: float = 1.0
+    # BCE positive-class weight for hits. The grid is sparse, so this trades
+    # recall for precision. Keep it near 1-2: high values (the old default was
+    # 8, tuned for a near-empty corpus) make the model fire common drums on
+    # every step — recall ~1, precision in the floor, 5x too dense.
+    hit_pos_weight: float = 1.5
     grad_clip: float = 1.0
     seed: int = 444
     device: str = "cuda"

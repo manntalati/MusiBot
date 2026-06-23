@@ -9,6 +9,7 @@ n_layers: 2
 dropout: 0.2
 velocity_loss_weight: 1.0
 offset_loss_weight: 1.0
+hit_pos_weight: 1.5      # BCE positive weight; >2 makes the model over-fire (too dense)
 grad_clip: 1.0
 seed: 444
 device: cuda

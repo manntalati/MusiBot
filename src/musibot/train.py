@@ -104,7 +104,9 @@ def train(cfg: TrainConfig, sources: list[str] | None = None):
     print(f"train windows={len(loaders['train'].dataset)}  val={len(loaders['val'].dataset)}")
 
     model = build_model(cfg).to(device)
-    loss_fn = DrumLoss(cfg.velocity_loss_weight, cfg.offset_loss_weight).to(device)
+    loss_fn = DrumLoss(
+        cfg.velocity_loss_weight, cfg.offset_loss_weight, cfg.hit_pos_weight
+    ).to(device)
     optimizer = AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     if cfg.overfit_one_batch:

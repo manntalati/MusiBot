@@ -21,7 +21,7 @@ class DrumLoss(nn.Module):
         self,
         velocity_weight: float = 1.0,
         offset_weight: float = 1.0,
-        hit_pos_weight: float = 8.0,
+        hit_pos_weight: float = 1.5,
     ):
         super().__init__()
         self.velocity_weight = velocity_weight
