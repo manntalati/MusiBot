@@ -93,6 +93,7 @@ class ConditionalDrumTransformer(nn.Module):
         teacher_forcing: bool = True,
         threshold: float = 0.5,
         style: torch.Tensor | None = None,
+        ss_prob: float = 0.0,
     ) -> torch.Tensor:
         memory = self.encode(conditioning, style)
         B, T, _ = conditioning.shape
@@ -101,9 +102,31 @@ class ConditionalDrumTransformer(nn.Module):
             # Shift right: position t sees ground-truth steps 0..t-1.
             start = torch.zeros(B, 1, N_DRUM_CLASSES, N_CHANNELS, device=drums.device)
             tgt_in = torch.cat([start, drums[:, :-1]], dim=1)
+            if ss_prob > 0.0:
+                tgt_in = self._mix_own(tgt_in, memory, threshold, ss_prob)
             return self._decode(tgt_in, memory)
 
         return self._generate(memory, T, threshold)
+
+    def _mix_own(
+        self, tgt_tf: torch.Tensor, memory: torch.Tensor, threshold: float, ss_prob: float
+    ) -> torch.Tensor:
+        """Scheduled sampling: swap a fraction ``ss_prob`` of the teacher-forced
+        decoder inputs for the model's own (detached) hard predictions.
+
+        A pure teacher-forced decoder learns to copy the ground-truth previous
+        bar rather than read the conditioning, then collapses to a flat groove at
+        inference (it never has ground truth to copy). Feeding it its own errors
+        during training closes that gap. Two parallel passes (the first detached)
+        approximate a full 128-step rollout at ~1.2x the teacher-forced cost.
+        """
+        with torch.no_grad():
+            own = binarize(self._decode(tgt_tf, memory), threshold)
+            own_in = torch.cat([tgt_tf[:, :1], own[:, :-1]], dim=1)  # re-shift right
+        use_own = (
+            torch.rand(tgt_tf.size(0), tgt_tf.size(1), 1, 1, device=tgt_tf.device) < ss_prob
+        ).float()
+        return use_own * own_in + (1.0 - use_own) * tgt_tf
 
     def _generate(self, memory: torch.Tensor, T: int, threshold: float = 0.5) -> torch.Tensor:
         B = memory.size(0)

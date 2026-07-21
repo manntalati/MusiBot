@@ -176,4 +176,27 @@ class TrainConfig:
     device: str = "cuda"
     overfit_one_batch: bool = False     # Phase 3 pipeline sanity check
     patience: int = 15                  # epochs with no val improvement -> early stop
+
+    # --- Scheduled sampling -------------------------------------------------
+    # A pure teacher-forced decoder learns to copy the ground-truth previous bar
+    # instead of reading the conditioning, then collapses to a flat, structureless
+    # groove at inference. Scheduled sampling feeds the model its own predictions
+    # for a fraction of steps, ramping from 0 to ``ss_max_prob`` between
+    # ``ss_start_epoch`` and ``ss_start_epoch + ss_ramp_epochs``.
+    scheduled_sampling: bool = False
+    ss_max_prob: float = 0.5
+    ss_start_epoch: int = 5             # epochs of pure TF first (learn the marginals)
+    ss_ramp_epochs: int = 15            # epochs to ramp from 0 up to ss_max_prob
+
+    # --- Training economy / selection --------------------------------------
+    # Cap the number of train windows (random, seeded) so epochs stay tractable;
+    # None uses the full corpus. num_workers parallelizes the .npz loading.
+    max_train_windows: int | None = None
+    num_workers: int = 0
+    # Checkpoint selection metric: "gen" = autoregressive backbone hit-F1 (what we
+    # actually care about); "loss" = teacher-forced val loss (blind to the flat-
+    # field failure, the old default).
+    select_by: str = "loss"
+    gen_eval_batches: int = 6          # val batches used for the AR metric each epoch
+
     extra: dict = field(default_factory=dict)

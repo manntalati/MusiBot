@@ -69,6 +69,7 @@ class BaselineLSTM(nn.Module):
         teacher_forcing: bool = True,
         threshold: float = 0.5,
         style: torch.Tensor | None = None,
+        ss_prob: float = 0.0,
     ) -> torch.Tensor:
         B, T, _ = conditioning.shape
         device = conditioning.device
@@ -95,7 +96,13 @@ class BaselineLSTM(nn.Module):
             steps.append(step)
 
             if teacher_forcing and drums is not None:
-                prev = drums[:, t]
+                if ss_prob > 0.0:
+                    # Scheduled sampling: per-example, sometimes feed the model's
+                    # own hard prediction instead of the ground-truth previous step.
+                    use_own = (torch.rand(B, 1, 1, device=device) < ss_prob).float()
+                    prev = use_own * binarize(step, threshold) + (1.0 - use_own) * drums[:, t]
+                else:
+                    prev = drums[:, t]
             else:
                 prev = binarize(step, threshold)
 

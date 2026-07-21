@@ -6,6 +6,7 @@ venv/
 
 data/external/
 data/processed/
+data/soundfonts/
 *.ckpt
 *.pt
 runs/

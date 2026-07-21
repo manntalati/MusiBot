@@ -1,7 +1,7 @@
 # Phase 4 main model: conditional Transformer (encoder + AR decoder).
 model: transformer
 batch_size: 64
-epochs: 120
+epochs: 60
 lr: 0.0003
 weight_decay: 0.01
 hidden_dim: 256
@@ -16,3 +16,21 @@ seed: 444
 device: cuda
 overfit_one_batch: false
 patience: 12
+
+# Scheduled sampling: the fix for the flat/structureless groove a pure teacher-
+# forced decoder produced. Pure TF for the first 5 epochs (learn the marginals),
+# then ramp own-prediction feedback to 0.5 over the next 15.
+scheduled_sampling: true
+ss_max_prob: 0.5
+ss_start_epoch: 5
+ss_ramp_epochs: 15
+
+# Select the checkpoint on autoregressive backbone hit-F1 (real inference quality)
+# rather than teacher-forced val loss, which is blind to the flat-field failure.
+select_by: gen
+gen_eval_batches: 6
+
+# Thorough run: full corpus (~370k windows, ~25-33 min/epoch on MPS). Set an int
+# here (e.g. 120000) to subsample for faster epochs.
+max_train_windows: null
+num_workers: 4

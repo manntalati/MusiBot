@@ -16,7 +16,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from ..config import PROCESSED_DIR, UNKNOWN_STYLE_ID, WINDOW_STEPS
+from ..config import FEATURE_STATS_FILE, PROCESSED_DIR, UNKNOWN_STYLE_ID, WINDOW_STEPS
 from .normalize import apply_stats, load_stats
 
 
@@ -47,6 +47,8 @@ class DrumDataset(Dataset):
         val_frac: float = 0.1,
         test_frac: float = 0.1,
         processed_dir: Path = PROCESSED_DIR,
+        limit: int | None = None,
+        seed: int = 444,
     ):
         self.split = split
         self.stats = load_stats()  # None when no stats file -> features pass through
@@ -58,16 +60,31 @@ class DrumDataset(Dataset):
             if sources
             else [processed_dir]
         )
+        skipped = 0
         for root in search:
             for npz in sorted(Path(root).rglob("*.npz")):
+                if npz.name == FEATURE_STATS_FILE.name:
+                    continue  # corpus-stats sidecar in the processed root, not a clip
                 if split_of(npz.stem, val_frac, test_frac) != split:
                     continue
-                cond, _, _ = _load_npz(str(npz))
+                try:
+                    cond, _, _ = _load_npz(str(npz))
+                except (KeyError, ValueError, OSError, EOFError):
+                    skipped += 1  # partial write or non-clip archive
+                    continue
                 T = len(cond)
                 if T < WINDOW_STEPS:
                     continue
                 for start in range(0, T - WINDOW_STEPS + 1, hop):
                     self.index.append((str(npz), start))
+        if skipped:
+            print(f"[DrumDataset:{split}] skipped {skipped} unreadable/non-clip npz")
+
+        # Optionally cap the number of windows (seeded) so epochs stay tractable.
+        if limit is not None and len(self.index) > limit:
+            rng = np.random.default_rng(seed)
+            keep = rng.choice(len(self.index), size=limit, replace=False)
+            self.index = [self.index[i] for i in sorted(keep)]
 
     def __len__(self) -> int:
         return len(self.index)
@@ -88,11 +105,22 @@ def make_loaders(
     batch_size: int = 32,
     sources: list[str] | None = None,
     num_workers: int = 4,
+    max_train_windows: int | None = None,
+    seed: int = 444,
 ) -> dict[str, DataLoader]:
-    """Build train/val/test ``DataLoader``s sharing the same split config."""
+    """Build train/val/test ``DataLoader``s sharing the same split config.
+
+    ``max_train_windows`` caps only the *train* split (a seeded random subset),
+    so the val/test metrics stay measured over the full held-out data.
+    """
     loaders = {}
     for split in ("train", "val", "test"):
-        ds = DrumDataset(split=split, sources=sources)
+        ds = DrumDataset(
+            split=split,
+            sources=sources,
+            limit=max_train_windows if split == "train" else None,
+            seed=seed,
+        )
         # Only drop a ragged final batch when there is more than one batch;
         # otherwise tiny splits (e.g. the 5-song fine-tune set) yield nothing.
         drop_last = split == "train" and len(ds) > batch_size
