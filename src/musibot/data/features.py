@@ -15,10 +15,13 @@ from ..config import (
     BEATS_PER_BAR,
     FEATURE_DIM,
     HOP_LENGTH,
+    N_BASE_FEATURES,
     SAMPLE_RATE,
     STEPS_PER_BAR,
     STEPS_PER_BEAT,
 )
+from .mood import compute_mood
+from .normalize import load_stats
 from .representation import step_duration
 
 
@@ -80,8 +83,17 @@ def extract_features(
     for c in range(12):
         features[:, 5 + c] = _to_steps(chroma[c], frame_times, step_times)
 
-    # 17th feature: structural section id, normalized.
-    features[:, -1] = _section_ids(chroma, frame_times, step_times, n_sections)
+    # Last base feature: structural section id, normalized.
+    features[:, N_BASE_FEATURES - 1] = _section_ids(
+        chroma, frame_times, step_times, n_sections
+    )
+
+    # Song-global mood scalars, computed from the base columns (pre-normalization)
+    # and broadcast across every step. Same function + corpus stats used when
+    # migrating already-prepared clips, so train/inference values line up.
+    features[:, N_BASE_FEATURES:] = compute_mood(
+        features[:, :N_BASE_FEATURES], tempo, load_stats()
+    )
 
     return features, tempo, n_steps
 

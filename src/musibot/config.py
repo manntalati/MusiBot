@@ -82,14 +82,27 @@ FEATURE_NAMES = [
     "spectral_contrast",  # (raw)
     *[f"chroma_{i}" for i in range(12)],
     "section_id",       # normalized structural-section index
+    # Song-global "Spotify-style" descriptors (data/mood.py), bounded 0..1 and
+    # constant across the clip. They give the model a coarse mood/energy handle
+    # (busier drums for high energy, brighter kit for high valence, etc.). Not
+    # z-scored — already bounded — so they are appended after the magnitude dims
+    # and left out of NORM_FEATURE_INDICES.
+    "mood_energy",       # loudness/activity vs. the corpus, 0..1
+    "mood_valence",      # major/bright vs. minor/dark, 0..1
+    "mood_danceability",  # rhythmic drive + danceable tempo, 0..1
 ]
-FEATURE_DIM = len(FEATURE_NAMES)  # 18
+FEATURE_DIM = len(FEATURE_NAMES)  # 21
+
+# Index of the first mood scalar; base (audio/positional) features are [:N_BASE].
+N_BASE_FEATURES = FEATURE_NAMES.index("mood_energy")  # 18
+MOOD_FEATURE_INDICES = (18, 19, 20)
+MOOD_NEUTRAL = 0.5  # value used for drum-only / positional clips with no audio
 
 # The unbounded "magnitude" features whose scale is clip-dependent. These are
 # emitted in raw librosa units and z-scored with corpus-level statistics
 # (data/normalize.py) so the train and inference distributions line up. The
-# remaining dims are already bounded (phase/downbeat/chroma/section) and pass
-# through untouched.
+# remaining dims are already bounded (phase/downbeat/chroma/section/mood) and
+# pass through untouched.
 NORM_FEATURE_INDICES = (2, 3, 4)
 FEATURE_STATS_FILE = PROCESSED_DIR / "feature_stats.npz"
 

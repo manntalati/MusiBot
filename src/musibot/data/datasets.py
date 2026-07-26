@@ -46,6 +46,8 @@ MAX_SECONDS = 360.0
 from ..config import (
     EXTERNAL_DIR,
     FEATURE_DIM,
+    MOOD_NEUTRAL,
+    N_BASE_FEATURES,
     PROCESSED_DIR,
     RAW_SONGS_DIR,
     SAMPLE_RATE,
@@ -102,6 +104,8 @@ def positional_conditioning(n_steps: int) -> np.ndarray:
     steps = np.arange(n_steps)
     feats[:, 0] = (steps % STEPS_PER_BEAT) / STEPS_PER_BEAT
     feats[:, 1] = (steps % STEPS_PER_BAR == 0).astype(np.float32)
+    # No audio to derive mood from -> neutral, matching mood.compute_mood.
+    feats[:, N_BASE_FEATURES:] = MOOD_NEUTRAL
     return feats
 
 

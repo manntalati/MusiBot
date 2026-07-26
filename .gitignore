@@ -17,3 +17,7 @@ wandb/
 .ipynb_checkpoints/
 drums.mid
 final.wav
+
+# Secrets — never commit
+.env
+.env.local
