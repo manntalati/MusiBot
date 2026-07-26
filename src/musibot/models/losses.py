@@ -44,3 +44,31 @@ class DrumLoss(nn.Module):
 
         total = hit_loss + self.velocity_weight * vel_loss + self.offset_weight * off_loss
         return {"total": total, "hit": hit_loss, "velocity": vel_loss, "offset": off_loss}
+
+
+class MaskedDrumLoss(DrumLoss):
+    """Reconstruction loss scored ONLY on masked time-steps (MAE/BERT-style).
+
+    ``step_mask`` is ``[B, T]`` (True where the step was masked and must be
+    reconstructed); the loss ignores unmasked steps entirely.
+    """
+
+    def forward(  # type: ignore[override]
+        self, pred: torch.Tensor, target: torch.Tensor, step_mask: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        cell_mask = step_mask.unsqueeze(-1).float()            # [B, T, 1] over 9 classes
+        cells = cell_mask.expand(-1, -1, pred.shape[-2])       # [B, T, 9]
+
+        hit_ce = F.binary_cross_entropy_with_logits(
+            pred[..., CH_HIT], target[..., CH_HIT], pos_weight=self.pos_weight, reduction="none"
+        )
+        hit_loss = (hit_ce * cells).sum() / cells.sum().clamp(min=1.0)
+
+        # Velocity/offset only where a real hit exists AND the step was masked.
+        reg_mask = target[..., CH_HIT] * cells
+        denom = reg_mask.sum().clamp(min=1.0)
+        vel_loss = (((pred[..., CH_VELOCITY] - target[..., CH_VELOCITY]) ** 2) * reg_mask).sum() / denom
+        off_loss = (((pred[..., CH_OFFSET] - target[..., CH_OFFSET]) ** 2) * reg_mask).sum() / denom
+
+        total = hit_loss + self.velocity_weight * vel_loss + self.offset_weight * off_loss
+        return {"total": total, "hit": hit_loss, "velocity": vel_loss, "offset": off_loss}

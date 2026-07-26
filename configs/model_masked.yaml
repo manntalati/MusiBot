@@ -1,0 +1,29 @@
+# Phase 2: masked drum-infilling transformer (bidirectional, MAE/BERT-style).
+# Trained with scripts/train_masked.py — reconstructs masked bars from the
+# surrounding drums + audio conditioning. Reuses the same width-21 clips.
+model: masked
+batch_size: 64
+epochs: 60
+lr: 0.0003
+weight_decay: 0.01
+hidden_dim: 256
+n_layers: 4
+n_heads: 8
+dropout: 0.1
+velocity_loss_weight: 1.0
+offset_loss_weight: 1.0
+hit_pos_weight: 1.5
+grad_clip: 1.0
+seed: 444
+device: cuda            # falls back to mps / cpu automatically
+patience: 12
+
+# Full corpus (same ~370k windows as the AR model). Set an int to subsample.
+max_train_windows: null
+num_workers: 4
+
+# Masking schedule (read from cfg.extra by scripts/train_masked.py): each sample
+# masks a random fraction of its bars in [min, max]. Spanning the full range
+# teaches both small-gap infill and large-gap generation.
+mask_min_ratio: 0.15
+mask_max_ratio: 0.65
