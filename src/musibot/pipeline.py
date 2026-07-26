@@ -32,6 +32,7 @@ import torch
 
 from .config import (
     CH_HIT,
+    CH_VELOCITY,
     DRUM_CLASSES,
     N_BASE_FEATURES,
     N_CHANNELS,
@@ -44,8 +45,9 @@ from .config import (
 from .data.features import extract_features
 from .data.mood import detect_key
 from .data.normalize import apply_stats, load_stats
-from .data.representation import grid_to_midi
+from .data.representation import grid_to_midi, midi_to_grid
 from .data.separate import SEPARATION_SR, separate_song
+from .data.transcribe import transcribe_drums
 from .render import overlay, render_midi
 from .train import build_model, load_config, resolve_device
 
@@ -69,6 +71,9 @@ _STATE: dict = {}
 # repeat generations are reproducible and instant. Bounded to a few uploads.
 _SEP_CACHE: dict = {}
 _SEP_CACHE_MAX = 4
+# Phase-1 style imitation: transcribed fingerprint of the song's OWN drums,
+# cached per (file, tempo) so analysis and generation share one transcription.
+_REF_CACHE: dict = {}
 
 
 def _engine() -> dict:
@@ -111,9 +116,17 @@ def _separate(song_path: str | Path) -> dict:
         # Instrumentalness: how little of the mix is vocals (1 = instrumental).
         v, a = _rms(stems.get("vocals", np.zeros(1))), _rms(stems["accompaniment"])
         instrumentalness = 1.0 - v / (v + a + 1e-9)
+        # Keep the original drum stem (22.05 kHz) for Phase-1 style imitation.
+        drums = librosa.resample(
+            stems["drums"], orig_sr=SEPARATION_SR, target_sr=SAMPLE_RATE
+        ).astype(np.float32)
         if len(_SEP_CACHE) >= _SEP_CACHE_MAX:
             _SEP_CACHE.pop(next(iter(_SEP_CACHE)))
-        _SEP_CACHE[key] = {"accomp": accomp, "instrumentalness": float(instrumentalness)}
+        _SEP_CACHE[key] = {
+            "accomp": accomp,
+            "drums": drums,
+            "instrumentalness": float(instrumentalness),
+        }
     return _SEP_CACHE[key]
 
 
@@ -158,10 +171,62 @@ def _display_pattern(grid: np.ndarray) -> list[tuple[str, list[bool]]]:
     return out
 
 
+def _fingerprint(grid: np.ndarray) -> dict:
+    """Summarize a drum grid ``[T, 9, 3]`` into a style fingerprint."""
+    hits = grid[:, :, CH_HIT] > 0.5
+    T = max(1, len(hits))
+    active = int(hits.sum())
+    mean_vel = float(grid[:, :, CH_VELOCITY][hits].mean()) if active else 0.0
+    class_density = {DRUM_CLASSES[c]: float(hits[:, c].sum() / T) for c in range(N_DRUM_CLASSES)}
+    kit = [k for k, d in sorted(class_density.items(), key=lambda kv: -kv[1]) if d > 0.02][:4]
+    return {
+        "density": float(active / T),
+        "snare_beat24": _snare_beat24(hits, len(hits)),
+        "kick_per_step": float(hits[:, _kick_i].mean()),
+        "mean_velocity": mean_vel,
+        "class_density": class_density,
+        "kit": kit,
+        "pattern": _display_pattern(grid),
+        # Enough hits to be a real groove worth imitating (not silence/artifacts).
+        "has_drums": bool(active >= max(4, T * 0.02)),
+    }
+
+
+def reference_fingerprint(song_path: str | Path, tempo: float) -> dict:
+    """Transcribe the song's OWN drum stem into a style fingerprint (cached).
+
+    This is the Phase-1 "take ideas from the current song" signal: the original
+    drummer's density, backbone placement, kit and velocity feel.
+    """
+    p = Path(song_path)
+    st = p.stat()
+    key = (str(p.resolve()), st.st_size, int(st.st_mtime), round(float(tempo), 2))
+    if key not in _REF_CACHE:
+        drums = _separate(song_path)["drums"]
+        grid = midi_to_grid(transcribe_drums(drums, SAMPLE_RATE), tempo)
+        _REF_CACHE[key] = _fingerprint(grid)
+    return _REF_CACHE[key]
+
+
+def suggested_controls(fp: dict) -> tuple[float, float, float]:
+    """Fingerprint -> (energy, danceability, target_density) to imitate the song.
+
+    Valence stays audio-derived (drums don't carry it). Energy blends the
+    original's busyness + how hard it's hit; danceability tracks how squarely it
+    lands on the backbeat; target_density is the original's density, which the
+    generator matches directly (the reliable knob for "as busy as the original").
+    """
+    dens = fp["density"]
+    energy = float(np.clip(0.6 * min(dens / 1.2, 1.0) + 0.4 * fp["mean_velocity"], 0.15, 0.95))
+    danceability = float(np.clip(0.35 + 0.6 * fp["snare_beat24"], 0.2, 0.95))
+    target_density = float(np.clip(dens, 0.1, 2.0))
+    return energy, danceability, target_density
+
+
 def analyze_song(song_path: str | Path) -> dict:
     """Separate (cached) + return the song's mood/energy profile for the UI."""
-    accomp = _separate(song_path)["accomp"]
-    feats, tempo, T = extract_features(accomp, SAMPLE_RATE)  # base + auto mood
+    entry = _separate(song_path)
+    feats, tempo, T = extract_features(entry["accomp"], SAMPLE_RATE)  # base + auto mood
     energy, valence, danceability = (float(x) for x in feats[0, N_BASE_FEATURES:])
     key_name, is_major = detect_key(feats[:, _CHROMA].mean(axis=0))
     return {
@@ -171,8 +236,9 @@ def analyze_song(song_path: str | Path) -> dict:
         "danceability": danceability,
         "key": key_name,
         "is_major": is_major,
-        "instrumentalness": _separate(song_path)["instrumentalness"],
+        "instrumentalness": entry["instrumentalness"],
         "steps": int(T),
+        "reference": reference_fingerprint(song_path, tempo),
     }
 
 
@@ -182,12 +248,14 @@ def _generate_grid(
     feedback: str | float,
     style: str | None,
     mood_override: tuple[float, float, float] | None = None,
+    target_density: float | None = None,
 ) -> tuple[np.ndarray, float, str]:
     """Drumless mix (22.05 kHz) -> binarised drum grid ``[T, 9, 3]``, tempo, report.
 
     ``mood_override`` replaces the auto-computed (energy, valence, danceability)
     scalars, letting the UI sliders steer the groove. ``feedback`` is ``"auto"``
-    (sweep + collapse-guard) or a fixed float threshold.
+    (sweep + collapse-guard) or a fixed float threshold. ``target_density`` (Phase-1
+    style imitation) picks the swept take whose density best matches the original.
     """
     eng = _engine()
     model, device = eng["model"], eng["device"]
@@ -219,10 +287,16 @@ def _generate_grid(
             f"total={int(hits.sum())}"
         )
 
-    ok = [t for t in takes if t[1] >= MIN_DENSITY]
-    fb, dens, s24, g, hits = ok[0] if ok else takes[-1]
-    flag = "" if ok else "  (still collapsed -> likely out-of-distribution)"
-    lines.append(f"-> chosen feedback={fb}  density={dens:.2f}  snare2&4={s24:.2f}{flag}")
+    if target_density is not None:
+        # Style imitation: match the original drummer's busyness.
+        fb, dens, s24, g, hits = min(takes, key=lambda t: abs(t[1] - target_density))
+        lines.append(f"-> imitate: target density~{target_density:.2f}  chosen feedback={fb}  "
+                     f"density={dens:.2f}  snare2&4={s24:.2f}")
+    else:
+        ok = [t for t in takes if t[1] >= MIN_DENSITY]
+        fb, dens, s24, g, hits = ok[0] if ok else takes[-1]
+        flag = "" if ok else "  (still collapsed -> likely out-of-distribution)"
+        lines.append(f"-> chosen feedback={fb}  density={dens:.2f}  snare2&4={s24:.2f}{flag}")
 
     out_grid = g.copy()
     out_grid[:, :, CH_HIT] = hits.astype(np.float32)
@@ -235,12 +309,14 @@ def process_song(
     feedback: str | float = "auto",
     drum_gain: float = 1.0,
     style: str | None = None,
+    target_density: float | None = None,
     workdir: str | Path | None = None,
 ) -> dict:
     """Run the full upload -> separate -> generate -> mix pipeline.
 
     ``mood`` is an optional (energy, valence, danceability) override for the
     generation; ``None`` uses the values auto-detected from the audio.
+    ``target_density`` (Phase-1 imitation) matches the original drummer's busyness.
     """
     if not Path(SF2).exists():
         raise FileNotFoundError(f"soundfont not found: {SF2} (set MUSIBOT_SOUNDFONT)")
@@ -249,7 +325,9 @@ def process_song(
     name = Path(song_path).stem
 
     accomp = _separate(song_path)["accomp"]
-    grid, tempo, report = _generate_grid(accomp, feedback, style, mood_override=mood)
+    grid, tempo, report = _generate_grid(
+        accomp, feedback, style, mood_override=mood, target_density=target_density
+    )
 
     midi_path = work / f"drums_{name}.mid"
     grid_to_midi(grid, tempo).write(str(midi_path))

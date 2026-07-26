@@ -13,6 +13,7 @@ Spotify is optional; set SPOTIFY_CLIENT_ID / SPOTIFY_CLIENT_SECRET to enable it
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -36,7 +37,7 @@ def _load_dotenv(path: str = ".env") -> None:
 _load_dotenv()  # before importing spotify so credentials are visible at build time
 
 from musibot import spotify  # noqa: E402
-from musibot.pipeline import analyze_song, process_song  # noqa: E402
+from musibot.pipeline import analyze_song, process_song, suggested_controls  # noqa: E402
 
 FEEDBACK_CHOICES = ["auto", "0.5", "0.35", "0.25"]
 
@@ -136,6 +137,16 @@ footer{ display:none !important; }
 .mb-step.on{ background:linear-gradient(180deg,var(--red-hot),var(--red-deep)); border-color:var(--red-hot);
   box-shadow:0 0 8px var(--red-glow), inset 0 1px 0 rgba(255,255,255,.25); }
 
+/* mood map (cross-song valence x energy scatter) */
+.mb-map{ padding:16px; background:var(--inset); border:1px solid var(--line); border-radius:14px; overflow-x:auto; }
+.mb-map svg{ display:block; margin:0 auto; max-width:100%; height:auto; }
+.mp-grid{ stroke:var(--line); stroke-width:1; }
+.mp-axis{ stroke:color-mix(in srgb,var(--line) 60%,var(--muted)); stroke-width:1.2; }
+.mp-quad{ font-family:var(--mono); font-size:9px; fill:var(--faint); letter-spacing:.14em; }
+.mp-axt{ font-family:var(--mono); font-size:10px; fill:var(--muted); letter-spacing:.16em; }
+.mp-dot{ fill:var(--red); stroke:var(--red-hot); stroke-width:1; }
+.mp-lbl{ font-family:var(--mono); font-size:10px; fill:var(--ink); }
+
 /* Gradio component polish */
 .gradio-container .block,.gradio-container .form,.gradio-container .gr-group{ background:transparent !important; border:none !important; }
 .gradio-container label span,.gradio-container .gr-check-radio{ color:var(--muted) !important; }
@@ -161,6 +172,7 @@ HERO = """
 
 EMPTY_PROFILE = '<div class="mb-empty">Upload a song to read its profile ◉</div>'
 EMPTY_SEQ = '<div class="mb-empty">Generate to see the pattern ◉</div>'
+EMPTY_REF = '<div class="mb-empty">Upload a song to read its own drums ◉</div>'
 
 
 def _band(v: float, lo: str, mid: str, hi: str) -> str:
@@ -199,6 +211,18 @@ def render_sequencer(pattern) -> str:
     return f'<div class="mb-seq">{rows}</div>'
 
 
+def render_reference(fp: dict) -> str:
+    """Show the song's OWN drums (transcribed) — the style we imitate in Phase 1."""
+    if not fp or not fp.get("has_drums"):
+        return '<div class="mb-empty">No clear drums found in this track to imitate ◉</div>'
+    kit = ", ".join(fp.get("kit", [])) or "—"
+    chips = (f'<span class="mb-chip">DENSITY <b>{fp["density"]:.2f}</b></span>'
+             f'<span class="mb-chip">BACKBONE <b>{round(fp["snare_beat24"] * 100)}%</b></span>'
+             f'<span class="mb-chip">KIT <b>{kit}</b></span>')
+    return (f'<div class="mb-chips" style="margin-bottom:10px">{chips}</div>'
+            f'{render_sequencer(fp["pattern"])}')
+
+
 def render_spotify(m: dict) -> str:
     art = f'<img class="mb-sp-art" src="{m["image"]}" alt="album art">' if m.get("image") else ""
     genres = "".join(f'<span class="mb-chip">{g}</span>' for g in m.get("genres", [])) or \
@@ -212,6 +236,69 @@ def render_spotify(m: dict) -> str:
             f'<div class="mb-sp-foot">{pop_s}style → <b>{m["style_name"]}</b></div></div></div>')
 
 
+MOOD_LOG = Path("data/mood_log.json")
+EMPTY_MAP = '<div class="mb-empty">Analyze a few songs to map their moods ◉</div>'
+
+
+def load_log() -> dict:
+    try:
+        return json.loads(MOOD_LOG.read_text())
+    except Exception:
+        return {}
+
+
+def log_profile(name: str, p: dict) -> dict:
+    """Persist a song's mood so the cross-song map accumulates across sessions."""
+    log = load_log()
+    log[name] = {"energy": p["energy"], "valence": p["valence"],
+                 "danceability": p["danceability"], "tempo": p["tempo"], "key": p["key"]}
+    MOOD_LOG.parent.mkdir(parents=True, exist_ok=True)
+    MOOD_LOG.write_text(json.dumps(log, indent=2))
+    return log
+
+
+def render_mood_map(log: dict) -> str:
+    """Valence (y) x Energy (x) scatter of every analyzed song — Russell's mood
+    circumplex, so quadrants read as moods and point size = danceability."""
+    if not log:
+        return EMPTY_MAP
+    W, H, M = 560, 400, 46
+    pw, ph = W - 2 * M, H - 2 * M
+    fx = lambda e: M + e * pw                       # noqa: E731
+    fy = lambda v: M + (1 - v) * ph                 # noqa: E731
+
+    grid = ""
+    for t in (0.25, 0.5, 0.75):
+        cls = "mp-axis" if t == 0.5 else "mp-grid"
+        grid += f'<line class="{cls}" x1="{fx(t):.0f}" y1="{M}" x2="{fx(t):.0f}" y2="{M+ph}"/>'
+        grid += f'<line class="{cls}" x1="{M}" y1="{fy(t):.0f}" x2="{M+pw}" y2="{fy(t):.0f}"/>'
+    frame = f'<rect x="{M}" y="{M}" width="{pw}" height="{ph}" fill="none" class="mp-grid"/>'
+
+    quads = (
+        f'<text class="mp-quad" x="{M+pw-8}" y="{M+14}" text-anchor="end">BRIGHT · HYPED</text>'
+        f'<text class="mp-quad" x="{M+8}" y="{M+14}">CALM · WARM</text>'
+        f'<text class="mp-quad" x="{M+pw-8}" y="{M+ph-8}" text-anchor="end">DARK · DRIVING</text>'
+        f'<text class="mp-quad" x="{M+8}" y="{M+ph-8}">MOODY · SPARSE</text>'
+    )
+    axes = (
+        f'<text class="mp-axt" x="{M+pw/2}" y="{H-14}" text-anchor="middle">ENERGY →</text>'
+        f'<text class="mp-axt" x="16" y="{M+ph/2}" text-anchor="middle" '
+        f'transform="rotate(-90 16 {M+ph/2:.0f})">VALENCE ↑</text>'
+    )
+    dots = ""
+    for name, e in log.items():
+        x, y, r = fx(e["energy"]), fy(e["valence"]), 4 + e.get("danceability", 0.5) * 4
+        dots += f'<circle class="mp-dot" cx="{x:.1f}" cy="{y:.1f}" r="{r:.1f}" opacity="0.9"/>'
+        anchor = "end" if e["energy"] > 0.8 else "start"
+        dx = -(r + 5) if anchor == "end" else (r + 5)
+        dots += (f'<text class="mp-lbl" x="{x+dx:.1f}" y="{y+3.5:.1f}" '
+                 f'text-anchor="{anchor}">{name}</text>')
+
+    svg = (f'<svg viewBox="0 0 {W} {H}" width="{W}" height="{H}">'
+           f'{grid}{frame}{quads}{axes}{dots}</svg>')
+    return f'<div class="mb-map">{svg}</div>'
+
+
 def spotify_status() -> str:
     if not spotify.is_configured():
         return ('<div class="mb-note">Spotify off. Set <b>SPOTIFY_CLIENT_ID</b> & '
@@ -222,12 +309,24 @@ def spotify_status() -> str:
             "check the id/secret.</div>")
 
 
-def analyze(song_path, progress=gr.Progress()):
+def analyze(song_path, imitate, progress=gr.Progress()):
     if not song_path:
-        return EMPTY_PROFILE, 0.5, 0.5, 0.5, "", None, ""
-    progress(0.15, desc="Separating stems & reading the song's mood…")
+        return (EMPTY_PROFILE, 0.5, 0.5, 0.5, "", None, "",
+                render_mood_map(load_log()), EMPTY_REF, None)
+    progress(0.15, desc="Separating stems, reading mood & the song's own drums…")
     p = analyze_song(song_path)
     stem = Path(song_path).stem.replace("_", " ")
+    log = log_profile(stem, p)
+
+    fp = p["reference"]
+    e, v, d = p["energy"], p["valence"], p["danceability"]
+    fp_state = None
+    if fp.get("has_drums"):
+        se, sd, td = suggested_controls(fp)
+        fp_state = {"target_density": td, "has_drums": True}
+        if imitate:                        # pre-set faders to imitate the original
+            e, d = se, sd
+
     sp_html, style = "", None
     if spotify.is_connected():
         try:
@@ -237,7 +336,8 @@ def analyze(song_path, progress=gr.Progress()):
         except Exception:
             sp_html = ""
     progress(1.0, desc="Done")
-    return render_profile(p), p["energy"], p["valence"], p["danceability"], sp_html, style, stem
+    return (render_profile(p), e, v, d, sp_html, style, stem,
+            render_mood_map(log), render_reference(fp), fp_state)
 
 
 def sp_match(query):
@@ -249,19 +349,25 @@ def sp_match(query):
     return render_spotify(m), m["style_name"]
 
 
-def generate(song_path, energy, valence, dance, feedback, drum_gain, style, progress=gr.Progress()):
+def generate(song_path, energy, valence, dance, feedback, drum_gain, style,
+             imitate, fp_state, progress=gr.Progress()):
     if not song_path:
         raise gr.Error("Upload a song first.")
     progress(0.1, desc="Generating drums…")
     fb = feedback if feedback == "auto" else float(feedback)
+    target_density = None
+    if imitate and fp_state and fp_state.get("has_drums"):
+        target_density = fp_state["target_density"]
+        fb = "auto"  # the density match needs the full feedback sweep to choose from
     r = process_song(song_path, mood=(energy, valence, dance), feedback=fb,
-                     drum_gain=drum_gain, style=style)
+                     drum_gain=drum_gain, style=style, target_density=target_density)
     progress(1.0, desc="Done")
     return r["mix"], r["drums"], r["accompaniment"], r["midi_path"], r["report"], render_sequencer(r["pattern"])
 
 
 with gr.Blocks(title="MusiBot") as demo:
     style_state = gr.State(None)
+    fp_state = gr.State(None)          # the song's own-drum fingerprint (Phase-1 imitation)
     gr.HTML(HERO)
     with gr.Row(equal_height=False):
         with gr.Column(scale=5):
@@ -276,6 +382,8 @@ with gr.Blocks(title="MusiBot") as demo:
             gr.HTML('<div class="mb-h">Song profile</div>')
             profile = gr.HTML(EMPTY_PROFILE)
             gr.HTML('<div class="mb-h">Groove controls — steer the mood</div>')
+            imitate = gr.Checkbox(value=True, label="Imitate the song's own drums",
+                                  info="Read the original drums and match their density + feel")
             energy = gr.Slider(0, 1, value=0.5, step=0.05, label="Energy",
                                info="Higher → tighter backbeat, more controlled groove")
             valence = gr.Slider(0, 1, value=0.5, step=0.05, label="Valence (mood)",
@@ -288,6 +396,8 @@ with gr.Blocks(title="MusiBot") as demo:
                 drum_gain = gr.Slider(0.2, 2.0, value=1.0, step=0.1, label="Drum level")
             go = gr.Button("◉ Generate drums", variant="primary", size="lg")
         with gr.Column(scale=6):
+            gr.HTML('<div class="mb-h">Reference groove — the song\'s own drums</div>')
+            ref_seq = gr.HTML(EMPTY_REF)
             gr.HTML('<div class="mb-h">Pattern — the generated groove</div>')
             sequencer = gr.HTML(EMPTY_SEQ)
             gr.HTML('<div class="mb-h">Final mix — your song with our drums</div>')
@@ -298,13 +408,18 @@ with gr.Blocks(title="MusiBot") as demo:
                 midi = gr.File(label="Generated drum MIDI")
                 report = gr.Textbox(label="Diagnostics", lines=7)
 
-    song.upload(analyze, inputs=song,
-                outputs=[profile, energy, valence, dance, sp_card, style_state, sp_query])
-    song.clear(lambda: (EMPTY_PROFILE, 0.5, 0.5, 0.5, "", None, ""),
-               outputs=[profile, energy, valence, dance, sp_card, style_state, sp_query])
+    gr.HTML('<div class="mb-h">Mood map — where your songs sit (valence × energy)</div>')
+    mood_map = gr.HTML(render_mood_map(load_log()))
+
+    song.upload(analyze, inputs=[song, imitate],
+                outputs=[profile, energy, valence, dance, sp_card, style_state, sp_query,
+                         mood_map, ref_seq, fp_state])
+    song.clear(lambda: (EMPTY_PROFILE, 0.5, 0.5, 0.5, "", None, "", EMPTY_REF, None),
+               outputs=[profile, energy, valence, dance, sp_card, style_state, sp_query,
+                        ref_seq, fp_state])
     sp_match_btn.click(sp_match, inputs=sp_query, outputs=[sp_card, style_state])
     go.click(generate,
-             inputs=[song, energy, valence, dance, feedback, drum_gain, style_state],
+             inputs=[song, energy, valence, dance, feedback, drum_gain, style_state, imitate, fp_state],
              outputs=[mix, drums, accomp, midi, report, sequencer])
 
 

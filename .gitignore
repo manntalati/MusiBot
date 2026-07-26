@@ -21,3 +21,6 @@ final.wav
 # Secrets — never commit
 .env
 .env.local
+
+# Local run state
+data/mood_log.json
