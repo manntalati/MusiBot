@@ -19,6 +19,8 @@ a raw hit logit, 1 sigmoid velocity, 2 tanh offset.
 
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
 
@@ -101,17 +103,60 @@ class MaskedDrumTransformer(nn.Module):
 
     @torch.no_grad()
     def infill(self, conditioning: torch.Tensor, drums: torch.Tensor, mask: torch.Tensor,
-               style: torch.Tensor | None = None, threshold: float = 0.5) -> torch.Tensor:
+               style: torch.Tensor | None = None, threshold: "float | torch.Tensor" = 0.5,
+               iters: int = 8) -> torch.Tensor:
         """Reconstruct masked steps; keep known steps untouched. Returns [B,T,9,3]
-        with a binarised hit channel."""
+        with a binarised hit channel.
+
+        ``threshold`` may be a scalar or a per-class ``[9]`` vector (lower the bar
+        for classes the model is shy about, e.g. hats/cymbals). ``iters > 1`` runs
+        **MaskGIT-style iterative decoding**: each round predicts the still-masked
+        steps, commits the most *confident* ones (they become context for the rest),
+        and re-masks the remainder on a cosine schedule — sharper, more coherent
+        fills, because low-confidence steps condition on already-committed structure.
+        """
         self.eval()
-        pred = self.forward(conditioning, drums, mask, style)
-        filled = pred.clone()
-        filled[..., CH_HIT] = (torch.sigmoid(pred[..., CH_HIT]) > threshold).float()
+        thr = threshold if torch.is_tensor(threshold) else torch.tensor(float(threshold))
+        thr = thr.to(device=drums.device, dtype=torch.float32)     # scalar or [9], broadcasts over classes
         out = drums.clone()
-        out[..., CH_HIT] = (out[..., CH_HIT] > 0.5).float()
-        m = mask.unsqueeze(-1).unsqueeze(-1).expand_as(out)
-        return torch.where(m, filled, out)
+        out[..., CH_HIT] = (out[..., CH_HIT] > 0.5).float()   # binarise known hits
+        remaining = mask.clone()                              # [B, T] still-masked
+
+        def commit(pred: torch.Tensor, idx: torch.Tensor, b: int) -> None:
+            step = pred[b, idx].clone()                       # [k, 9, 3]
+            step[..., CH_HIT] = (torch.sigmoid(pred[b, idx, :, CH_HIT]) > thr).float()
+            out[b, idx] = step
+            remaining[b, idx] = False
+
+        if iters <= 1:
+            pred = self.forward(conditioning, out, remaining, style)
+            for b in range(out.size(0)):
+                idx = remaining[b].nonzero(as_tuple=True)[0]
+                if len(idx):
+                    commit(pred, idx, b)
+            return out
+
+        total = mask.sum(1)                                   # [B] original masked count
+        for it in range(iters):
+            if not bool(remaining.any()):
+                break
+            pred = self.forward(conditioning, out, remaining, style)
+            probs = torch.sigmoid(pred[..., CH_HIT])          # [B, T, 9]
+            # Confidence = strongest hit probability at the step, so the groove
+            # skeleton (the steps most likely to contain a hit) is committed first
+            # and conditions the rest — rather than committing confident *silence*.
+            conf = probs.amax(-1)                              # [B, T]
+            conf = conf.masked_fill(~remaining, -1.0)
+            keep_ratio = math.cos(math.pi / 2 * (it + 1) / iters)  # 1 -> 0 over the run
+            for b in range(out.size(0)):
+                nrem = int(remaining[b].sum())
+                if nrem == 0:
+                    continue
+                keep = int(math.floor(keep_ratio * float(total[b])))
+                n_commit = nrem if it == iters - 1 else max(1, nrem - keep)
+                idx = torch.topk(conf[b], min(n_commit, nrem)).indices
+                commit(pred, idx, b)
+        return out
 
 
 __all__ = ["MaskedDrumTransformer", "make_span_mask"]

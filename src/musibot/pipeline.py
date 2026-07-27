@@ -45,14 +45,17 @@ from .config import (
 from .data.features import extract_features
 from .data.mood import detect_key
 from .data.normalize import apply_stats, load_stats
-from .data.representation import grid_to_midi, midi_to_grid
+from .data.representation import grid_to_midi, midi_to_grid, step_duration
 from .data.separate import SEPARATION_SR, separate_song
 from .data.transcribe import transcribe_drums
+from .models.masked_transformer import MaskedDrumTransformer
 from .render import overlay, render_midi
 from .train import build_model, load_config, resolve_device
 
 CKPT = os.environ.get("MUSIBOT_CKPT", "runs/transformer_best.pt")
 CONFIG = os.environ.get("MUSIBOT_CONFIG", "configs/model_transformer.yaml")
+MASKED_CKPT = os.environ.get("MUSIBOT_MASKED_CKPT", "runs/masked_best.pt")
+MASKED_CONFIG = os.environ.get("MUSIBOT_MASKED_CONFIG", "configs/model_masked.yaml")
 SF2 = os.environ.get("MUSIBOT_SOUNDFONT", "data/soundfonts/MuseScore_General.sf3")
 
 # Autoregressive feedback thresholds swept in "auto" mode, least-aggressive
@@ -66,6 +69,7 @@ _kick_i = DRUM_CLASSES.index("kick")
 _CHROMA = slice(5, 17)  # 12 chroma dims within the base features
 
 _STATE: dict = {}
+_MASKED: dict = {}     # lazily-loaded masked-infill model (Phase 2)
 # Demucs on MPS is non-deterministic and slow; cache each uploaded file's
 # drumless accompaniment (+ its vocal-derived instrumentalness) so analysis and
 # repeat generations are reproducible and instant. Bounded to a few uploads.
@@ -146,9 +150,12 @@ def _snare_beat24(hits: np.ndarray, T: int) -> float:
     return float(pos[[4, 12]].sum() / (pos.sum() + 1e-9))
 
 
-# Backbone rows shown in the UI step-sequencer (label -> drum class).
-_SEQ_ROWS = [("Kick", "kick"), ("Snare", "snare"), ("Hat", "hat_closed"),
-             ("Tom", "tom_mid"), ("Ride", "ride")]
+# UI step-sequencer rows -> the drum classes each one aggregates (a row lights
+# if ANY of its classes fire, so e.g. open+closed hats both show on the Hat row).
+_SEQ_ROWS = [("Kick", ["kick"]), ("Snare", ["snare"]),
+             ("Hat", ["hat_closed", "hat_open"]),
+             ("Tom", ["tom_high", "tom_mid", "tom_low"]),
+             ("Ride", ["ride", "crash"])]
 
 
 def _display_pattern(grid: np.ndarray) -> list[tuple[str, list[bool]]]:
@@ -165,9 +172,9 @@ def _display_pattern(grid: np.ndarray) -> list[tuple[str, list[bool]]]:
         b = int(np.argmax(acts))
         bar = hits[b * STEPS_PER_BAR:(b + 1) * STEPS_PER_BAR]
     out = []
-    for label, cls in _SEQ_ROWS:
-        ci = DRUM_CLASSES.index(cls)
-        out.append((label, [bool(bar[s, ci]) for s in range(STEPS_PER_BAR)]))
+    for label, classes in _SEQ_ROWS:
+        cis = [DRUM_CLASSES.index(c) for c in classes]
+        out.append((label, [bool(bar[s, cis].any()) for s in range(STEPS_PER_BAR)]))
     return out
 
 
@@ -342,4 +349,115 @@ def process_song(
         "tempo": tempo,
         "report": report,
         "pattern": _display_pattern(grid),
+    }
+
+
+def _masked_engine() -> dict:
+    """Lazily load + cache the masked drum-infilling model (Phase 2)."""
+    if "model" not in _MASKED:
+        cfg = load_config(MASKED_CONFIG)
+        device = resolve_device(cfg.device)
+        model = MaskedDrumTransformer(cfg.hidden_dim, cfg.n_layers, cfg.n_heads, cfg.dropout)
+        ckpt = torch.load(MASKED_CKPT, map_location=device)
+        model.load_state_dict(ckpt["model"])
+        model.to(device).eval()
+        _MASKED.update(model=model, device=device, epoch=ckpt.get("epoch", "?"))
+    return _MASKED
+
+
+def masked_available() -> bool:
+    return Path(MASKED_CKPT).exists()
+
+
+# The model under-fires on non-backbone classes; lower their hit threshold so
+# hats / cymbals / toms actually appear in fills (subtracted from the base
+# threshold, floored at 0.08). Kick + snare keep the base threshold.
+_CLASS_THR_DELTA = {
+    "hat_closed": 0.10, "hat_open": 0.10, "ride": 0.10, "crash": 0.08,
+    "tom_high": 0.06, "tom_mid": 0.06, "tom_low": 0.06,
+}
+
+
+def _class_thresholds(base: float) -> np.ndarray:
+    """Per-class hit thresholds ``[9]`` from a base (backbone) threshold."""
+    thr = np.full(N_DRUM_CLASSES, base, np.float32)
+    for cls, delta in _CLASS_THR_DELTA.items():
+        thr[DRUM_CLASSES.index(cls)] = max(0.08, base - delta)
+    return thr
+
+
+@torch.no_grad()
+def infill_break(
+    song_path: str | Path,
+    start_sec: float,
+    end_sec: float,
+    style: str | None = None,
+    drum_gain: float = 1.0,
+    threshold: float = 0.3,
+    iters: int = 8,
+    workdir: str | Path | None = None,
+) -> dict:
+    """Reconstruct the drums in ``[start_sec, end_sec)`` with the masked model.
+
+    The song's own drums (transcribed) provide the surrounding context; the model
+    fills the masked span from both sides + the audio. Output = the original song
+    with our generated drums laid into the marked range only.
+    """
+    if not masked_available():
+        raise FileNotFoundError(f"masked model not found: {MASKED_CKPT} — train it first")
+    if not Path(SF2).exists():
+        raise FileNotFoundError(f"soundfont not found: {SF2}")
+    eng = _masked_engine()
+    model, device = eng["model"], eng["device"]
+    work = Path(workdir or tempfile.mkdtemp(prefix="musibot_infill_"))
+    work.mkdir(parents=True, exist_ok=True)
+    name = Path(song_path).stem
+
+    entry = _separate(song_path)
+    feats, tempo, T = extract_features(entry["accomp"], SAMPLE_RATE)
+    known = midi_to_grid(transcribe_drums(entry["drums"], SAMPLE_RATE), tempo, n_steps=T)
+
+    dt = step_duration(tempo)
+    s = max(0, int(round(start_sec / dt)))
+    e = min(T, int(round(end_sec / dt)))
+    if e <= s:
+        raise ValueError("infill range is empty (end must be after start, within the song)")
+
+    mask = np.zeros(T, dtype=bool)
+    mask[s:e] = True
+    feats = apply_stats(feats, load_stats())
+
+    # Window into WINDOW_STEPS chunks and infill each (each window keeps its own
+    # surrounding drums + audio as context).
+    n = int(np.ceil(T / WINDOW_STEPS))
+    P = n * WINDOW_STEPS
+    fp = np.zeros((P, feats.shape[1]), np.float32); fp[:T] = feats
+    kp = np.zeros((P, N_DRUM_CLASSES, N_CHANNELS), np.float32); kp[:T] = known
+    mp = np.zeros(P, dtype=bool); mp[:T] = mask
+    cond = torch.from_numpy(fp.reshape(n, WINDOW_STEPS, -1)).to(device)
+    dgrid = torch.from_numpy(kp.reshape(n, WINDOW_STEPS, N_DRUM_CLASSES, N_CHANNELS)).to(device)
+    mten = torch.from_numpy(mp.reshape(n, WINDOW_STEPS)).to(device)
+    style_t = torch.full((n,), canonical_style(style), dtype=torch.long, device=device)
+
+    thr = torch.from_numpy(_class_thresholds(threshold)).to(device)   # per-class [9]
+    filled = model.infill(cond, dgrid, mten, style_t, threshold=thr, iters=iters)
+    filled = filled.cpu().numpy().reshape(-1, N_DRUM_CLASSES, N_CHANNELS)[:T]
+
+    # Render ONLY the reconstructed span; lay it over the original song audio.
+    gap = np.zeros_like(filled)
+    gap[s:e] = filled[s:e]
+    midi_path = work / f"infill_{name}.mid"
+    grid_to_midi(gap, tempo).write(str(midi_path))
+    gap_audio = render_midi(str(midi_path), SAMPLE_RATE, SF2)
+    original, _ = librosa.load(str(song_path), sr=SAMPLE_RATE, mono=True)
+    mix = overlay(original, gap_audio, drum_gain=drum_gain)
+
+    gap_hits = int((filled[s:e, :, CH_HIT] > 0.5).sum())
+    return {
+        "mix": (SAMPLE_RATE, mix),
+        "gap_drums": (SAMPLE_RATE, gap_audio),
+        "midi_path": str(midi_path),
+        "pattern": _display_pattern(filled[s:e]),
+        "range": (round(s * dt, 2), round(e * dt, 2)),
+        "report": f"filled {e - s} steps ({s * dt:.1f}-{e * dt:.1f}s)  hits={gap_hits}  tempo={tempo:.0f}",
     }

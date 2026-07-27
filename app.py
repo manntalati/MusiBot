@@ -37,7 +37,13 @@ def _load_dotenv(path: str = ".env") -> None:
 _load_dotenv()  # before importing spotify so credentials are visible at build time
 
 from musibot import spotify  # noqa: E402
-from musibot.pipeline import analyze_song, process_song, suggested_controls  # noqa: E402
+from musibot.pipeline import (  # noqa: E402
+    analyze_song,
+    infill_break,
+    masked_available,
+    process_song,
+    suggested_controls,
+)
 
 FEEDBACK_CHOICES = ["auto", "0.5", "0.35", "0.25"]
 
@@ -365,6 +371,22 @@ def generate(song_path, energy, valence, dance, feedback, drum_gain, style,
     return r["mix"], r["drums"], r["accompaniment"], r["midi_path"], r["report"], render_sequencer(r["pattern"])
 
 
+def infill_fn(song_path, start, end, style, drum_gain, density, progress=gr.Progress()):
+    if not song_path:
+        raise gr.Error("Upload a song first.")
+    if not masked_available():
+        raise gr.Error("The infill model isn't trained yet (runs/masked_best.pt missing).")
+    if start is None or end is None or float(end) <= float(start):
+        raise gr.Error("Set an End time later than the Start time.")
+    progress(0.2, desc="Reconstructing the break with the infill model…")
+    # Density slider (0..1) -> hit threshold (higher density = lower threshold).
+    threshold = max(0.12, min(0.5, 0.5 - float(density) * 0.35))
+    r = infill_break(song_path, float(start), float(end), style=style,
+                     drum_gain=drum_gain, threshold=threshold)
+    progress(1.0, desc="Done")
+    return r["mix"], render_sequencer(r["pattern"]), r["report"]
+
+
 with gr.Blocks(title="MusiBot") as demo:
     style_state = gr.State(None)
     fp_state = gr.State(None)          # the song's own-drum fingerprint (Phase-1 imitation)
@@ -411,6 +433,23 @@ with gr.Blocks(title="MusiBot") as demo:
     gr.HTML('<div class="mb-h">Mood map — where your songs sit (valence × energy)</div>')
     mood_map = gr.HTML(render_mood_map(load_log()))
 
+    gr.HTML('<div class="mb-h">Fill a break — masked drum infill (Phase 2)</div>')
+    with gr.Row(equal_height=False):
+        with gr.Column(scale=2):
+            gr.HTML('<div class="mb-note">Reconstruct the drums in a time range with the '
+                    'bidirectional infill model — it fills the gap from <b>both sides</b> + '
+                    'the audio, in the song\'s own style.</div>')
+            with gr.Row():
+                infill_start = gr.Number(value=0.0, label="Start (sec)", minimum=0)
+                infill_end = gr.Number(value=4.0, label="End (sec)", minimum=0)
+            infill_density = gr.Slider(0, 1, value=0.6, step=0.05, label="Fill density",
+                                       info="Higher → busier fill (the model is conservative)")
+            infill_btn = gr.Button("◉ Fill the break", variant="primary", size="lg")
+            infill_report = gr.Textbox(label="Infill info", lines=2)
+        with gr.Column(scale=3):
+            infill_mix = gr.Audio(label="Song with the break filled", type="numpy")
+            infill_seq = gr.HTML(EMPTY_SEQ)
+
     song.upload(analyze, inputs=[song, imitate],
                 outputs=[profile, energy, valence, dance, sp_card, style_state, sp_query,
                          mood_map, ref_seq, fp_state])
@@ -421,6 +460,9 @@ with gr.Blocks(title="MusiBot") as demo:
     go.click(generate,
              inputs=[song, energy, valence, dance, feedback, drum_gain, style_state, imitate, fp_state],
              outputs=[mix, drums, accomp, midi, report, sequencer])
+    infill_btn.click(infill_fn,
+                     inputs=[song, infill_start, infill_end, style_state, drum_gain, infill_density],
+                     outputs=[infill_mix, infill_seq, infill_report])
 
 
 if __name__ == "__main__":
