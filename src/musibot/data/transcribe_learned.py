@@ -42,10 +42,11 @@ def _load() -> dict:
 def transcribe_drums_learned(
     audio: np.ndarray, sr: int = SAMPLE_RATE, tempo: float = 120.0,
     n_steps: int | None = None, threshold: float = 0.4,
+    step_times: np.ndarray | None = None,
 ) -> np.ndarray:
     """Drum signal -> grid ``[T, 9, 3]`` via the learned transcriber."""
     eng = _load()
-    mel = drum_mel_features(audio, sr, tempo, n_steps)          # [T, n_mels]
+    mel = drum_mel_features(audio, sr, tempo, n_steps, step_times=step_times)   # [T, n_mels]
     x = torch.from_numpy(mel[None]).to(eng["device"])
     return eng["model"].transcribe(x, threshold=threshold)[0].cpu().numpy()
 

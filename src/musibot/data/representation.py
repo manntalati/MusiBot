@@ -68,15 +68,27 @@ def midi_to_grid(
     return grid
 
 
-def grid_to_midi(grid: np.ndarray, tempo: float, note_length: float = 0.1) -> pretty_midi.PrettyMIDI:
-    """Convert a ``[T, 9, 3]`` grid back to a single-instrument drum MIDI."""
+def grid_to_midi(
+    grid: np.ndarray, tempo: float, note_length: float = 0.1,
+    step_times: np.ndarray | None = None,
+) -> pretty_midi.PrettyMIDI:
+    """Convert a ``[T, 9, 3]`` grid back to a single-instrument drum MIDI.
+
+    ``step_times`` (seconds per step, e.g. from a beat-synchronous grid) places
+    each hit at its real time so the drums track a tempo-varying song; without it
+    the grid is uniform at ``tempo``.
+    """
     dt = step_duration(tempo)
     drum = pretty_midi.Instrument(program=0, is_drum=True, name="drums")
+    idx = None if step_times is None else np.arange(len(step_times))
 
     steps, classes = np.where(grid[:, :, CH_HIT] > 0.5)
     for step, cls in zip(steps, classes):
         offset = float(np.clip(grid[step, cls, CH_OFFSET], -0.5, 0.5))
-        start = max(0.0, (step + offset) * dt)
+        if step_times is None:
+            start = max(0.0, (step + offset) * dt)
+        else:                                       # interpolate the fractional step to seconds
+            start = max(0.0, float(np.interp(step + offset, idx, step_times)))
         velocity = int(np.clip(round(grid[step, cls, CH_VELOCITY] * 127), 1, 127))
         drum.notes.append(
             pretty_midi.Note(

@@ -200,12 +200,15 @@ def _fingerprint(grid: np.ndarray) -> dict:
     }
 
 
-def _transcribe_grid(drum_audio: np.ndarray, tempo: float, n_steps: int | None) -> np.ndarray:
+def _transcribe_grid(drum_audio: np.ndarray, tempo: float, n_steps: int | None,
+                     step_times: np.ndarray | None = None) -> np.ndarray:
     """Drum signal -> grid ``[T, 9, 3]``. Uses the learned ADT when trained
-    (all 9 classes), else the heuristic transcriber (kick/snare/hat/crash only)."""
+    (all 9 classes, honours ``step_times``), else the heuristic transcriber."""
     if adt_available():
         try:
-            return transcribe_drums_learned(drum_audio, SAMPLE_RATE, tempo, n_steps)
+            return transcribe_drums_learned(
+                drum_audio, SAMPLE_RATE, tempo, n_steps, step_times=step_times
+            )
         except Exception:  # noqa: BLE001 — never let the ADT break the pipeline
             pass
     return midi_to_grid(transcribe_drums(drum_audio, SAMPLE_RATE), tempo, n_steps=n_steps)
@@ -244,7 +247,7 @@ def suggested_controls(fp: dict) -> tuple[float, float, float]:
 def analyze_song(song_path: str | Path) -> dict:
     """Separate (cached) + return the song's mood/energy profile for the UI."""
     entry = _separate(song_path)
-    feats, tempo, T = extract_features(entry["accomp"], SAMPLE_RATE)  # base + auto mood
+    feats, tempo, step_times = extract_features(entry["accomp"], SAMPLE_RATE)  # base + auto mood
     energy, valence, danceability = (float(x) for x in feats[0, N_BASE_FEATURES:])
     key_name, is_major = detect_key(feats[:, _CHROMA].mean(axis=0))
     return {
@@ -255,7 +258,7 @@ def analyze_song(song_path: str | Path) -> dict:
         "key": key_name,
         "is_major": is_major,
         "instrumentalness": entry["instrumentalness"],
-        "steps": int(T),
+        "steps": len(step_times),
         "reference": reference_fingerprint(song_path, tempo),
     }
 
@@ -267,18 +270,21 @@ def _generate_grid(
     style: str | None,
     mood_override: tuple[float, float, float] | None = None,
     target_density: float | None = None,
-) -> tuple[np.ndarray, float, str]:
-    """Drumless mix (22.05 kHz) -> binarised drum grid ``[T, 9, 3]``, tempo, report.
+) -> tuple[np.ndarray, float, str, np.ndarray]:
+    """Drumless mix (22.05 kHz) -> binarised drum grid ``[T, 9, 3]``, tempo, report,
+    step_times.
 
     ``mood_override`` replaces the auto-computed (energy, valence, danceability)
     scalars, letting the UI sliders steer the groove. ``feedback`` is ``"auto"``
     (sweep + collapse-guard) or a fixed float threshold. ``target_density`` (Phase-1
     style imitation) picks the swept take whose density best matches the original.
+    Features use a **beat-synchronous** grid so the drums stay locked to a
+    tempo-varying song; ``step_times`` maps each step back to seconds for rendering.
     """
     eng = _engine()
     model, device = eng["model"], eng["device"]
 
-    feats, tempo, _ = extract_features(accomp_22k, SAMPLE_RATE)
+    feats, tempo, step_times = extract_features(accomp_22k, SAMPLE_RATE, beat_sync=True)
     if mood_override is not None:
         feats[:, N_BASE_FEATURES:] = np.asarray(mood_override, np.float32)
     feats = apply_stats(feats, eng["stats"])
@@ -318,7 +324,7 @@ def _generate_grid(
 
     out_grid = g.copy()
     out_grid[:, :, CH_HIT] = hits.astype(np.float32)
-    return out_grid, tempo, "\n".join(lines)
+    return out_grid, tempo, "\n".join(lines), step_times[:len(out_grid)]
 
 
 def process_song(
@@ -343,12 +349,12 @@ def process_song(
     name = Path(song_path).stem
 
     accomp = _separate(song_path)["accomp"]
-    grid, tempo, report = _generate_grid(
+    grid, tempo, report, step_times = _generate_grid(
         accomp, feedback, style, mood_override=mood, target_density=target_density
     )
 
     midi_path = work / f"drums_{name}.mid"
-    grid_to_midi(grid, tempo).write(str(midi_path))
+    grid_to_midi(grid, tempo, step_times=step_times).write(str(midi_path))
     drums = render_midi(str(midi_path), SAMPLE_RATE, SF2)
     mix = overlay(accomp, drums, drum_gain=drum_gain)
 
@@ -425,12 +431,14 @@ def infill_break(
     name = Path(song_path).stem
 
     entry = _separate(song_path)
-    feats, tempo, T = extract_features(entry["accomp"], SAMPLE_RATE)
-    known = _transcribe_grid(entry["drums"], tempo, T)
+    feats, tempo, step_times = extract_features(entry["accomp"], SAMPLE_RATE, beat_sync=True)
+    T = len(step_times)
+    known = _transcribe_grid(entry["drums"], tempo, T, step_times=step_times)
 
-    dt = step_duration(tempo)
-    s = max(0, int(round(start_sec / dt)))
-    e = min(T, int(round(end_sec / dt)))
+    # Map the requested seconds to step indices via the (possibly non-uniform)
+    # beat-synchronous step times.
+    s = max(0, int(np.searchsorted(step_times, start_sec)))
+    e = min(T, int(np.searchsorted(step_times, end_sec)))
     if e <= s:
         raise ValueError("infill range is empty (end must be after start, within the song)")
 
@@ -458,17 +466,18 @@ def infill_break(
     gap = np.zeros_like(filled)
     gap[s:e] = filled[s:e]
     midi_path = work / f"infill_{name}.mid"
-    grid_to_midi(gap, tempo).write(str(midi_path))
+    grid_to_midi(gap, tempo, step_times=step_times).write(str(midi_path))
     gap_audio = render_midi(str(midi_path), SAMPLE_RATE, SF2)
     original, _ = librosa.load(str(song_path), sr=SAMPLE_RATE, mono=True)
     mix = overlay(original, gap_audio, drum_gain=drum_gain)
 
     gap_hits = int((filled[s:e, :, CH_HIT] > 0.5).sum())
+    t0, t1 = float(step_times[s]), float(step_times[min(e, T - 1)])
     return {
         "mix": (SAMPLE_RATE, mix),
         "gap_drums": (SAMPLE_RATE, gap_audio),
         "midi_path": str(midi_path),
         "pattern": _display_pattern(filled[s:e]),
-        "range": (round(s * dt, 2), round(e * dt, 2)),
-        "report": f"filled {e - s} steps ({s * dt:.1f}-{e * dt:.1f}s)  hits={gap_hits}  tempo={tempo:.0f}",
+        "range": (round(t0, 2), round(t1, 2)),
+        "report": f"filled {e - s} steps ({t0:.1f}-{t1:.1f}s)  hits={gap_hits}  tempo={tempo:.0f}",
     }
