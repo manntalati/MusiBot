@@ -48,6 +48,7 @@ from .data.normalize import apply_stats, load_stats
 from .data.representation import grid_to_midi, midi_to_grid, step_duration
 from .data.separate import SEPARATION_SR, separate_song
 from .data.transcribe import transcribe_drums
+from .data.transcribe_learned import adt_available, transcribe_drums_learned
 from .models.masked_transformer import MaskedDrumTransformer
 from .render import overlay, render_midi
 from .train import build_model, load_config, resolve_device
@@ -199,6 +200,17 @@ def _fingerprint(grid: np.ndarray) -> dict:
     }
 
 
+def _transcribe_grid(drum_audio: np.ndarray, tempo: float, n_steps: int | None) -> np.ndarray:
+    """Drum signal -> grid ``[T, 9, 3]``. Uses the learned ADT when trained
+    (all 9 classes), else the heuristic transcriber (kick/snare/hat/crash only)."""
+    if adt_available():
+        try:
+            return transcribe_drums_learned(drum_audio, SAMPLE_RATE, tempo, n_steps)
+        except Exception:  # noqa: BLE001 — never let the ADT break the pipeline
+            pass
+    return midi_to_grid(transcribe_drums(drum_audio, SAMPLE_RATE), tempo, n_steps=n_steps)
+
+
 def reference_fingerprint(song_path: str | Path, tempo: float) -> dict:
     """Transcribe the song's OWN drum stem into a style fingerprint (cached).
 
@@ -209,8 +221,7 @@ def reference_fingerprint(song_path: str | Path, tempo: float) -> dict:
     st = p.stat()
     key = (str(p.resolve()), st.st_size, int(st.st_mtime), round(float(tempo), 2))
     if key not in _REF_CACHE:
-        drums = _separate(song_path)["drums"]
-        grid = midi_to_grid(transcribe_drums(drums, SAMPLE_RATE), tempo)
+        grid = _transcribe_grid(_separate(song_path)["drums"], tempo, None)
         _REF_CACHE[key] = _fingerprint(grid)
     return _REF_CACHE[key]
 
@@ -393,7 +404,7 @@ def infill_break(
     end_sec: float,
     style: str | None = None,
     drum_gain: float = 1.0,
-    threshold: float = 0.3,
+    threshold: float = 0.55,
     iters: int = 8,
     workdir: str | Path | None = None,
 ) -> dict:
@@ -415,7 +426,7 @@ def infill_break(
 
     entry = _separate(song_path)
     feats, tempo, T = extract_features(entry["accomp"], SAMPLE_RATE)
-    known = midi_to_grid(transcribe_drums(entry["drums"], SAMPLE_RATE), tempo, n_steps=T)
+    known = _transcribe_grid(entry["drums"], tempo, T)
 
     dt = step_duration(tempo)
     s = max(0, int(round(start_sec / dt)))

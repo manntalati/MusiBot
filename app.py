@@ -380,7 +380,8 @@ def infill_fn(song_path, start, end, style, drum_gain, density, progress=gr.Prog
         raise gr.Error("Set an End time later than the Start time.")
     progress(0.2, desc="Reconstructing the break with the infill model…")
     # Density slider (0..1) -> hit threshold (higher density = lower threshold).
-    threshold = max(0.12, min(0.5, 0.5 - float(density) * 0.35))
+    # Calibrated for the ADT-context regime, where the sweet spot is ~0.6.
+    threshold = max(0.35, min(0.72, 0.70 - float(density) * 0.32))
     r = infill_break(song_path, float(start), float(end), style=style,
                      drum_gain=drum_gain, threshold=threshold)
     progress(1.0, desc="Done")
@@ -442,8 +443,8 @@ with gr.Blocks(title="MusiBot") as demo:
             with gr.Row():
                 infill_start = gr.Number(value=0.0, label="Start (sec)", minimum=0)
                 infill_end = gr.Number(value=4.0, label="End (sec)", minimum=0)
-            infill_density = gr.Slider(0, 1, value=0.6, step=0.05, label="Fill density",
-                                       info="Higher → busier fill (the model is conservative)")
+            infill_density = gr.Slider(0, 1, value=0.45, step=0.05, label="Fill density",
+                                       info="Higher → busier fill")
             infill_btn = gr.Button("◉ Fill the break", variant="primary", size="lg")
             infill_report = gr.Textbox(label="Infill info", lines=2)
         with gr.Column(scale=3):
