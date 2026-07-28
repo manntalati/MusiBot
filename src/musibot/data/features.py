@@ -41,36 +41,80 @@ def estimate_tempo(audio: np.ndarray, sr: int = SAMPLE_RATE) -> tuple[float, np.
     return float(np.atleast_1d(tempo)[0]), beats
 
 
+def _downbeat_phase(audio: np.ndarray, sr: int, beats: np.ndarray,
+                    meter: int = BEATS_PER_BAR) -> int:
+    """Which beat-phase (0..meter-1) carries the downbeats, by onset energy.
+
+    Assumes 4/4; picks the phase whose beats average the strongest onset (the
+    downbeat usually lands on kick/bass). A coarse stand-in for madmom.
+    """
+    env = librosa.onset.onset_strength(y=audio, sr=sr, hop_length=HOP_LENGTH)
+    times = librosa.frames_to_time(np.arange(len(env)), sr=sr, hop_length=HOP_LENGTH)
+    strength = np.interp(beats, times, env)
+    scores = [strength[p::meter].mean() if strength[p::meter].size else -1.0
+              for p in range(meter)]
+    return int(np.argmax(scores))
+
+
+_BEAT_THIS: dict = {}
+
+
+def _beat_this_tracker():
+    """Lazily load the Beat This! learned beat/downbeat tracker (cached, CPU)."""
+    if "a2b" not in _BEAT_THIS:
+        from beat_this.inference import Audio2Beats
+
+        _BEAT_THIS["a2b"] = Audio2Beats(checkpoint_path="final0", device="cpu", dbn=False)
+    return _BEAT_THIS["a2b"]
+
+
+def _track_beats(audio: np.ndarray, sr: int) -> tuple[np.ndarray | None, np.ndarray | None, float]:
+    """Return (beats, downbeats, tempo). Prefers the learned tracker (clean,
+    accurate, gives downbeats); falls back to PLP then the DP beat tracker."""
+    try:  # Beat This! — SOTA learned tracker; low jitter + real downbeats
+        beats, downbeats = _beat_this_tracker()(np.ascontiguousarray(audio, dtype=np.float32), sr)
+        beats = np.atleast_1d(np.asarray(beats, float))
+        if len(beats) >= 2:
+            return beats, np.atleast_1d(np.asarray(downbeats, float)), 60.0 / float(np.median(np.diff(beats)))
+    except Exception:  # noqa: BLE001 — never let a tracker error break generation
+        pass
+    # Fallback 1: PLP (predominant local pulse), constrained to a quarter-note band.
+    pulse = librosa.beat.plp(y=audio, sr=sr, tempo_min=BEAT_TEMPO_MIN, tempo_max=BEAT_TEMPO_MAX)
+    beats = librosa.frames_to_time(np.flatnonzero(librosa.util.localmax(pulse)), sr=sr)
+    if len(beats) >= 2:
+        return beats, None, 60.0 / float(np.median(np.diff(beats)))
+    # Fallback 2: DP beat tracker.
+    tempo, beats = librosa.beat.beat_track(y=audio, sr=sr, units="time")
+    beats = np.atleast_1d(beats).astype(float)
+    return (beats if len(beats) >= 2 else None), None, float(np.atleast_1d(tempo)[0])
+
+
 def beat_sync_grid(audio: np.ndarray, sr: int = SAMPLE_RATE) -> tuple[np.ndarray | None, float]:
     """Beat-synchronous step times (seconds) following the song's tempo curve.
 
-    Tracks beats (which speed up / slow down with the music) and subdivides each
-    beat interval into ``STEPS_PER_BEAT`` 16th-note steps, so the grid stays
-    locked to the music even when the tempo drifts. Step 0 is the first beat.
-    Returns ``(None, tempo)`` when too few beats are found (caller falls back to a
-    uniform grid). Works on drumless audio — beat tracking uses the onset envelope
-    (bass / chords / vocals), not just drums.
+    Subdivides each tracked beat into ``STEPS_PER_BEAT`` 16th-note steps, so the
+    grid stays locked to the music even when the tempo drifts. The grid is anchored
+    to the first **downbeat**, so ``step % STEPS_PER_BAR == 0`` lines up with real
+    bars (matching how the model was trained). Returns ``(None, tempo)`` when too
+    few beats are found (caller falls back to a uniform grid). Works on drumless
+    audio — the trackers use harmonic/percussive onsets, not just drums.
 
-    Uses **predominant local pulse** (``librosa.beat.plp``), which follows tempo
-    changes far better than the dynamic-programming beat tracker (that one assumes a
-    roughly constant tempo); falls back to ``beat_track`` then to a uniform grid.
+    Uses the **Beat This!** learned tracker (clean, low-jitter beats + downbeats);
+    PLP / DP beat tracking are fallbacks.
     """
-    # PLP constrained to a typical quarter-note tempo band, so it locks onto the
-    # beat (not an 8th/16th subdivision — the free tracker hits the octave) while
-    # still following tempo changes. The band excludes the common 2x octave error
-    # for most pop/rock; genuinely fast/slow songs fall back to the DP tracker.
-    pulse = librosa.beat.plp(y=audio, sr=sr, tempo_min=BEAT_TEMPO_MIN, tempo_max=BEAT_TEMPO_MAX)
-    beat_frames = np.flatnonzero(librosa.util.localmax(pulse))
-    beats = librosa.frames_to_time(beat_frames, sr=sr)
-    if len(beats) >= 2:
-        tempo = 60.0 / float(np.median(np.diff(beats)))
-    else:                                          # fall back to the DP tracker's beats
-        tempo, beats = librosa.beat.beat_track(y=audio, sr=sr, units="time")
-        tempo = float(np.atleast_1d(tempo)[0])
-        beats = np.atleast_1d(beats).astype(float)
+    beats, downbeats, tempo = _track_beats(audio, sr)
+    if beats is None or len(beats) < 2:
+        return None, tempo
+
+    # Anchor at the first real downbeat (or the strongest onset phase as a stand-in).
+    if downbeats is not None and len(downbeats):
+        beats = beats[beats >= downbeats[0] - 1e-6]
+    elif len(beats) >= 2 * BEATS_PER_BAR:
+        beats = beats[_downbeat_phase(audio, sr, beats):]
     if len(beats) < 2:
         return None, tempo
 
+    tempo = 60.0 / float(np.median(np.diff(beats)))
     duration = len(audio) / sr
     times: list[float] = []
     for i in range(len(beats) - 1):
