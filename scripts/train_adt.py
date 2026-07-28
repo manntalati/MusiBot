@@ -78,7 +78,13 @@ def main():
           f"val={len(loaders['val'].dataset)}")
 
     model = DrumTranscriber(hidden=cfg.hidden_dim, n_layers=cfg.n_layers, dropout=cfg.dropout).to(device)
-    pw = torch.tensor(cfg.hit_pos_weight, device=device)
+    # Per-class positive weight: up-weight rare/hard classes (e.g. hat_open, which
+    # is easily confused with hat_closed) so the model is more willing to fire them.
+    pw = torch.full((len(DRUM_CLASSES),), float(cfg.hit_pos_weight), device=device)
+    for cls, w in cfg.extra.get("class_pos_weight", {}).items():
+        if cls in DRUM_CLASSES:
+            pw[DRUM_CLASSES.index(cls)] = float(w)
+    print("per-class pos_weight:", {c: round(float(pw[i]), 1) for i, c in enumerate(DRUM_CLASSES)})
     opt = AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     if args.overfit_one_batch:
