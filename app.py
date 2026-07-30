@@ -36,14 +36,39 @@ def _load_dotenv(path: str = ".env") -> None:
 
 _load_dotenv()  # before importing spotify so credentials are visible at build time
 
+import pandas as pd  # noqa: E402
+
 from musibot import spotify  # noqa: E402
 from musibot.pipeline import (  # noqa: E402
     analyze_song,
     infill_break,
     masked_available,
     process_song,
+    render_pattern,
     suggested_controls,
 )
+
+# Editable groove: rows = backbone kit, cols = 16 sixteenth-note steps.
+GROOVE_ROWS = ["Kick", "Snare", "Hat", "Tom", "Ride"]
+DF_COLS = ["Drum"] + [str(i + 1) for i in range(16)]
+EMPTY_GROOVE_DF = pd.DataFrame(
+    [[n] + [False] * 16 for n in GROOVE_ROWS], columns=DF_COLS
+)
+
+
+def pattern_to_df(pattern) -> pd.DataFrame:
+    if not pattern:
+        return EMPTY_GROOVE_DF.copy()
+    return pd.DataFrame([[n] + [bool(x) for x in steps] for n, steps in pattern], columns=DF_COLS)
+
+
+def df_to_pattern(df) -> list:
+    if not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(df, columns=DF_COLS)
+    out = []
+    for _, row in df.iterrows():
+        out.append((str(row.iloc[0]), [bool(row.iloc[i + 1]) for i in range(16)]))
+    return out
 
 FEEDBACK_CHOICES = ["auto", "0.5", "0.35", "0.25"]
 
@@ -368,7 +393,18 @@ def generate(song_path, energy, valence, dance, feedback, drum_gain, style,
     r = process_song(song_path, mood=(energy, valence, dance), feedback=fb,
                      drum_gain=drum_gain, style=style, target_density=target_density)
     progress(1.0, desc="Done")
-    return r["mix"], r["drums"], r["accompaniment"], r["midi_path"], r["report"], render_sequencer(r["pattern"])
+    return (r["mix"], r["drums"], r["accompaniment"], r["midi_path"], r["report"],
+            render_sequencer(r["pattern"]), pattern_to_df(r["pattern"]))
+
+
+def render_groove_fn(song_path, df, drum_gain, progress=gr.Progress()):
+    if not song_path:
+        raise gr.Error("Upload a song first.")
+    progress(0.2, desc="Rendering your groove…")
+    pattern = df_to_pattern(df)
+    r = render_pattern(song_path, pattern, drum_gain=drum_gain)
+    progress(1.0, desc="Done")
+    return r["mix"], r["drums"]
 
 
 def infill_fn(song_path, start, end, style, drum_gain, density, progress=gr.Progress()):
@@ -423,6 +459,17 @@ with gr.Blocks(title="MusiBot") as demo:
             ref_seq = gr.HTML(EMPTY_REF)
             gr.HTML('<div class="mb-h">Pattern — the generated groove</div>')
             sequencer = gr.HTML(EMPTY_SEQ)
+            gr.HTML('<div class="mb-h">Edit the groove — tick steps to change it, then re-render</div>')
+            gr.HTML('<div class="mb-note">Tweak the main 16-step pattern (it repeats every bar, '
+                    'locked to the beat). Re-render to hear your version in place of the model\'s.</div>')
+            groove_df = gr.Dataframe(
+                value=EMPTY_GROOVE_DF, headers=DF_COLS, datatype=["str"] + ["bool"] * 16,
+                row_count=5, column_count=17, interactive=True,
+                label="Groove (rows = kit, columns = 16 steps)",
+            )
+            render_groove_btn = gr.Button("◉ Render my groove", variant="primary")
+            groove_mix = gr.Audio(label="Your groove — final mix", type="numpy")
+            groove_drums = gr.Audio(label="Your groove — drums only", type="numpy")
             gr.HTML('<div class="mb-h">Final mix — your song with our drums</div>')
             mix = gr.Audio(label="Final mix", type="numpy")
             drums = gr.Audio(label="Generated drums only", type="numpy")
@@ -460,7 +507,10 @@ with gr.Blocks(title="MusiBot") as demo:
     sp_match_btn.click(sp_match, inputs=sp_query, outputs=[sp_card, style_state])
     go.click(generate,
              inputs=[song, energy, valence, dance, feedback, drum_gain, style_state, imitate, fp_state],
-             outputs=[mix, drums, accomp, midi, report, sequencer])
+             outputs=[mix, drums, accomp, midi, report, sequencer, groove_df])
+    render_groove_btn.click(render_groove_fn,
+                            inputs=[song, groove_df, drum_gain],
+                            outputs=[groove_mix, groove_drums])
     infill_btn.click(infill_fn,
                      inputs=[song, infill_start, infill_end, style_state, drum_gain, infill_density],
                      outputs=[infill_mix, infill_seq, infill_report])

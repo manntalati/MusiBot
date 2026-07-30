@@ -369,6 +369,59 @@ def process_song(
     }
 
 
+# Which drum class each editable sequencer row renders as.
+_PATTERN_RENDER_CLASS = {"Kick": "kick", "Snare": "snare", "Hat": "hat_closed",
+                         "Tom": "tom_mid", "Ride": "ride"}
+
+
+def render_pattern(
+    song_path: str | Path,
+    pattern: list[tuple[str, list[bool]]],
+    drum_gain: float = 1.0,
+    velocity: float = 0.85,
+    workdir: str | Path | None = None,
+) -> dict:
+    """Tile a user-edited 16-step ``pattern`` across the song's beat-synced grid
+    and mix it onto the drumless accompaniment.
+
+    ``pattern`` is the editable backbone (rows Kick/Snare/Hat/Tom/Ride, each a list
+    of 16 bools). It repeats every bar, locked to the tracked beats, so the groove
+    stays tight and in time — the user's own steady groove in place of the model's.
+    """
+    if not Path(SF2).exists():
+        raise FileNotFoundError(f"soundfont not found: {SF2}")
+    work = Path(workdir or tempfile.mkdtemp(prefix="musibot_pat_"))
+    work.mkdir(parents=True, exist_ok=True)
+    name = Path(song_path).stem
+
+    accomp = _separate(song_path)["accomp"]
+    _, tempo, step_times = extract_features(accomp, SAMPLE_RATE, beat_sync=True)
+    T = len(step_times)
+
+    grid = np.zeros((T, N_DRUM_CLASSES, N_CHANNELS), np.float32)
+    for row_name, steps in pattern:
+        cls = _PATTERN_RENDER_CLASS.get(row_name)
+        if cls is None or not any(steps):
+            continue
+        ci = DRUM_CLASSES.index(cls)
+        span = len(steps) or STEPS_PER_BAR
+        for t in range(T):
+            if steps[t % span]:
+                grid[t, ci, CH_HIT] = 1.0
+                grid[t, ci, CH_VELOCITY] = velocity
+
+    midi_path = work / f"pattern_{name}.mid"
+    grid_to_midi(grid, tempo, step_times=step_times).write(str(midi_path))
+    drums = render_midi(str(midi_path), SAMPLE_RATE, SF2)
+    mix = overlay(accomp, drums, drum_gain=drum_gain)
+    return {
+        "mix": (SAMPLE_RATE, mix),
+        "drums": (SAMPLE_RATE, drums),
+        "midi_path": str(midi_path),
+        "tempo": tempo,
+    }
+
+
 def _masked_engine() -> dict:
     """Lazily load + cache the masked drum-infilling model (Phase 2)."""
     if "model" not in _MASKED:
