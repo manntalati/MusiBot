@@ -8,6 +8,10 @@ than as raw audio. A sequence model conditioned on musical features of the
 drumless song predicts a drum grid, which is rendered to audio with a drum
 soundfont and mixed in.
 
+## Demo
+
+[demo](https://github.com/user-attachments/assets/d9a1e35d-b851-476f-b5a0-fffc076481cd)
+
 ## Pipeline
 
 ```
